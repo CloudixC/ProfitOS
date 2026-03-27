@@ -3671,12 +3671,14 @@ function renderModal(){
     win.appendChild(tb);
     // Image
     const imgArea=h("div",{style:{flex:1,overflow:"auto",display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",background:"#111"}});
-    const imgSrc=r.data||r.thumb;
-    if(imgSrc&&r.type&&r.type.startsWith("image")){
-      imgArea.appendChild(h("img",{src:imgSrc,style:{maxWidth:"100%",maxHeight:"70vh",borderRadius:"8px",boxShadow:"0 4px 20px rgba(0,0,0,.4)",imageRendering:r.thumbOnly?"auto":"auto"}}));
-      if(r.thumbOnly)imgArea.appendChild(h("div",{style:{position:"absolute",bottom:"20px",left:"50%",transform:"translateX(-50%)",background:"rgba(0,0,0,.7)",color:"#aaa",padding:"6px 14px",borderRadius:"6px",fontSize:"11px"}},"Thumbnail only — full image was auto-downloaded when uploaded"));
-    } else if(!imgSrc&&r.thumbOnly){
-      imgArea.appendChild(h("div",{style:{textAlign:"center",color:"#888",padding:"40px"}},h("div",{style:{fontSize:"48px",marginBottom:"8px"}},"📄"),h("div",{},"Full file was auto-downloaded on upload")));
+    if(r.data&&r.type&&r.type.startsWith("image")){
+      imgArea.appendChild(h("img",{src:r.data,style:{maxWidth:"100%",maxHeight:"70vh",borderRadius:"8px",boxShadow:"0 4px 20px rgba(0,0,0,.4)"}}));
+    } else if(r.gDriveLink){
+      imgArea.appendChild(h("div",{style:{textAlign:"center",color:"#888",padding:"40px"}},
+        h("div",{style:{fontSize:"48px",marginBottom:"8px"}},"☁️"),
+        h("div",{style:{marginBottom:"12px"}},"Stored in Google Drive"),
+        h("a",{href:r.gDriveLink,target:"_blank",style:{color:"var(--pb)",textDecoration:"underline",fontSize:"13px"}},"Open in Google Drive ↗")
+      ));
     } else {
       imgArea.appendChild(h("div",{style:{textAlign:"center",color:"#888",padding:"40px"}},h("div",{style:{fontSize:"48px",marginBottom:"8px"}},"📄"),h("div",{},"PDF — download to view")));
     }
@@ -4336,25 +4338,152 @@ async function createThumbnail(dataUrl,maxSize){
   });
 }
 
-// Strip full image data from a receipt, keeping only thumbnail
+// Compress receipt image to storage-friendly preview (400px wide, JPEG 70%)
+// Used when Google Drive isn't connected — keeps visual quality while saving space
 async function compressReceiptForStorage(receipt){
-  if(!receipt.data||receipt.thumbOnly)return false;
+  if(!receipt.data||receipt.compressed)return false;
   if(receipt.type&&receipt.type.startsWith("image")){
-    const thumb=await createThumbnail(receipt.data,80);
-    if(thumb){
-      receipt.thumb=thumb;
-      receipt.data=null;
-      receipt.thumbOnly=true;
+    const preview=await compressImage(receipt.data,400);
+    if(preview&&preview.length<receipt.data.length){
+      receipt.fullData=receipt.data; // keep original temporarily
+      receipt.data=preview;
+      receipt.compressed=true;
       return true;
     }
-  } else {
-    // PDF — just drop the data, keep metadata
-    receipt.data=null;
-    receipt.thumbOnly=true;
-    return true;
   }
   return false;
 }
+
+// ═══════════════════════════════════════════════════
+// GOOGLE DRIVE INTEGRATION — Receipt Storage
+// ═══════════════════════════════════════════════════
+
+let gDriveToken=null;
+const GDRIVE_CLIENT_ID_KEY="cra-gdrive-client-id";
+const GDRIVE_FOLDER_NAME="CRA-Receipts";
+
+async function loadGDriveClientId(){
+  try{const r=await window.storage.get(storageKey("gdrive-client-id"));return r?r.value:null;}catch(e){return null;}
+}
+async function saveGDriveClientId(id){
+  try{await window.storage.set(storageKey("gdrive-client-id"),id);}catch(e){}
+}
+
+// OAuth2 implicit flow — opens Google sign-in popup
+async function gDriveAuth(){
+  const clientId=await loadGDriveClientId();
+  if(!clientId){alert("Set your Google Client ID in Settings first.");return false;}
+  
+  return new Promise((resolve)=>{
+    const redirectUri=window.location.origin+window.location.pathname;
+    const scope="https://www.googleapis.com/auth/drive.file";
+    const url="https://accounts.google.com/o/oauth2/v2/auth?client_id="+encodeURIComponent(clientId)
+      +"&redirect_uri="+encodeURIComponent(redirectUri)
+      +"&response_type=token&scope="+encodeURIComponent(scope)
+      +"&prompt=consent";
+    
+    const popup=window.open(url,"gauth","width=500,height=600");
+    const timer=setInterval(()=>{
+      try{
+        if(!popup||popup.closed){clearInterval(timer);resolve(false);return;}
+        const pUrl=popup.location.href;
+        if(pUrl.includes("access_token")){
+          const hash=pUrl.split("#")[1];
+          const params=new URLSearchParams(hash);
+          gDriveToken=params.get("access_token");
+          popup.close();clearInterval(timer);
+          resolve(!!gDriveToken);
+        }
+      }catch(e){/* cross-origin, keep waiting */}
+    },500);
+    // Timeout after 2 minutes
+    setTimeout(()=>{clearInterval(timer);if(popup&&!popup.closed)popup.close();resolve(false);},120000);
+  });
+}
+
+// Find or create a folder in Google Drive
+async function gDriveFindOrCreateFolder(name,parentId){
+  if(!gDriveToken)return null;
+  // Search for existing folder
+  let q="name='"+name.replace(/'/g,"\\'")+"' and mimeType='application/vnd.google-apps.folder' and trashed=false";
+  if(parentId)q+=" and '"+parentId+"' in parents";
+  
+  const searchResp=await fetch("https://www.googleapis.com/drive/v3/files?q="+encodeURIComponent(q)+"&fields=files(id,name)",{
+    headers:{Authorization:"Bearer "+gDriveToken}
+  });
+  const searchData=await searchResp.json();
+  if(searchData.files&&searchData.files.length>0)return searchData.files[0].id;
+  
+  // Create folder
+  const meta={name,mimeType:"application/vnd.google-apps.folder"};
+  if(parentId)meta.parents=[parentId];
+  const createResp=await fetch("https://www.googleapis.com/drive/v3/files",{
+    method:"POST",
+    headers:{Authorization:"Bearer "+gDriveToken,"Content-Type":"application/json"},
+    body:JSON.stringify(meta)
+  });
+  const created=await createResp.json();
+  return created.id||null;
+}
+
+// Upload a receipt to Google Drive with organized folder structure
+async function uploadReceiptToGDrive(receipt){
+  if(!gDriveToken||!receipt.data)return null;
+  try{
+    const biz=state.data.businesses.find(b=>b.id===receipt.business);
+    const bizName=(biz?biz.name:"Personal").replace(/[\/\\:*?"<>|]/g,"-");
+    const d=new Date(receipt.date||today());
+    const monthNames=["January","February","March","April","May","June","July","August","September","October","November","December"];
+    const yearStr=String(d.getFullYear());
+    const monthStr=String(d.getMonth()+1).padStart(2,"0")+"-"+monthNames[d.getMonth()];
+    const catName=(receipt.folder||"Uncategorized").replace(/[\/\\:*?"<>|]/g,"-");
+    
+    // Create folder chain: CRA-Receipts / Business / Year / Month / Category
+    const rootId=await gDriveFindOrCreateFolder(GDRIVE_FOLDER_NAME,null);
+    const bizId=await gDriveFindOrCreateFolder(bizName,rootId);
+    const yearId=await gDriveFindOrCreateFolder(yearStr,bizId);
+    const monthId=await gDriveFindOrCreateFolder(monthStr,yearId);
+    const catId=await gDriveFindOrCreateFolder(catName,monthId);
+    
+    if(!catId){console.error("Failed to create Drive folder chain");return null;}
+    
+    // Convert data URI to blob
+    const parts=receipt.data.split(",");
+    const mime=parts[0].match(/:(.*?);/)?.[1]||"image/jpeg";
+    const binary=atob(parts[1]);
+    const arr=new Uint8Array(binary.length);
+    for(let i=0;i<binary.length;i++)arr[i]=binary.charCodeAt(i);
+    const blob=new Blob([arr],{type:mime});
+    
+    // Upload file using multipart upload
+    const fileName=receiptFileName(receipt);
+    const metadata={name:fileName,parents:[catId]};
+    
+    const form=new FormData();
+    form.append("metadata",new Blob([JSON.stringify(metadata)],{type:"application/json"}));
+    form.append("file",blob);
+    
+    const uploadResp=await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink",{
+      method:"POST",
+      headers:{Authorization:"Bearer "+gDriveToken},
+      body:form
+    });
+    const uploaded=await uploadResp.json();
+    
+    if(uploaded.id){
+      receipt.gDriveId=uploaded.id;
+      receipt.gDriveLink=uploaded.webViewLink||null;
+      return uploaded.id;
+    }
+    return null;
+  }catch(e){
+    console.error("Google Drive upload failed:",e);
+    return null;
+  }
+}
+
+// Check if Google Drive is connected
+function isGDriveConnected(){return !!gDriveToken;}
 
 // Auto-detect folder from filename or vendor name — matches CRA expense categories
 // Right-click context menu like an OS
@@ -4744,9 +4873,24 @@ function renderReceipts(){
           saveData();render();
           if(file.type.startsWith("image")){
             scanReceipt(receipt).then(async()=>{
+              // Auto-upload to Google Drive if connected
+              if(isGDriveConnected()&&receipt.data){
+                const driveId=await uploadReceiptToGDrive(receipt);
+                if(driveId){
+                  await compressReceiptForStorage(receipt);
+                  saveData();
+                }
+              }
               state.modal="receipt_edit";state.editReceiptId=receipt.id;render();
             });
-          } else {state.modal="receipt_edit";state.editReceiptId=receipt.id;render();}
+          } else {
+            // PDF — upload to Drive if connected
+            if(isGDriveConnected()&&receipt.data){
+              const driveId=await uploadReceiptToGDrive(receipt);
+              if(driveId){receipt.data=null;receipt.compressed=true;saveData();}
+            }
+            state.modal="receipt_edit";state.editReceiptId=receipt.id;render();
+          }
         };reader.readAsDataURL(file);
       }
     });inp.click();
@@ -4757,24 +4901,55 @@ function renderReceipts(){
       await exportReceiptsAsZip(null,"CRA-Receipts");
     }},"📥 Download ZIP"));
   }
-  // Compress old receipts to free storage
-  const fullSizeCount=receipts.filter(r=>r.data&&!r.thumbOnly).length;
-  if(fullSizeCount>0){
-    taskbar.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"6px 12px",color:"var(--po)"},onClick:async()=>{
-      if(!confirm("This will:\n1. Download all "+fullSizeCount+" full-size receipt(s) as a ZIP first\n2. Replace full images with tiny thumbnails in the app\n\nThis frees up storage space. Your full images are safe in the ZIP.\n\nContinue?")){return;}
-      // Download ZIP first
-      await exportReceiptsAsZip(r=>r.data&&!r.thumbOnly,"Full-Receipts-Backup");
-      // Then compress all
-      let compressed=0;
-      for(const r of receipts){
-        if(r.data&&!r.thumbOnly){
-          const ok=await compressReceiptForStorage(r);
-          if(ok)compressed++;
+  // Google Drive connect / Upload
+  const fullSizeCount=receipts.filter(r=>r.data&&!r.compressed).length;
+  if(isGDriveConnected()){
+    taskbar.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"6px 12px",color:"var(--pg)"}},"☁️ Drive ✓"));
+    if(fullSizeCount>0){
+      taskbar.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"6px 12px",color:"var(--pb)"},onClick:async()=>{
+        if(!confirm("Upload "+fullSizeCount+" full-size receipt(s) to Google Drive, then compress images in app to save storage?\n\nFolder: CRA-Receipts / Business / Year / Month / Category"))return;
+        let uploaded=0;let failed=0;
+        for(const r of receipts){
+          if(r.data&&!r.compressed){
+            const id=await uploadReceiptToGDrive(r);
+            if(id){
+              uploaded++;
+              // Compress for local storage now that full image is in Drive
+              await compressReceiptForStorage(r);
+            } else {failed++;}
+          }
         }
+        saveData();render();
+        alert("✓ "+uploaded+" uploaded to Google Drive"+(failed>0?", "+failed+" failed":"")+".\nLocal storage freed up!");
+      }},"☁️ Upload "+fullSizeCount+" to Drive"));
+    }
+  } else {
+    taskbar.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"6px 12px",color:"var(--pb)"},onClick:async()=>{
+      const clientId=await loadGDriveClientId();
+      if(!clientId){
+        const id=prompt("To connect Google Drive, you need a Google Cloud Client ID.\n\n1. Go to console.cloud.google.com\n2. Create a project → Enable Google Drive API\n3. Create OAuth 2.0 Client ID (Web app)\n4. Add this as redirect URI:\n"+window.location.origin+window.location.pathname+"\n\nPaste your Client ID here:");
+        if(!id)return;
+        await saveGDriveClientId(id.trim());
       }
-      saveData();render();
-      alert("✓ Compressed "+compressed+" receipt(s). Storage freed up!");
-    }},"🗜 Compress "+fullSizeCount+" receipt"+(fullSizeCount!==1?"s":"")));
+      const ok=await gDriveAuth();
+      if(ok){render();alert("✓ Google Drive connected! Your receipts will upload to a CRA-Receipts folder.");}
+      else alert("Google Drive connection failed. Check your Client ID in Settings.");
+    }},"☁️ Connect Google Drive"));
+    // Fallback compress without Drive
+    if(fullSizeCount>0){
+      taskbar.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"6px 12px",color:"var(--po)"},onClick:async()=>{
+        if(!confirm("Compress "+fullSizeCount+" receipt(s) to 400px previews?\n\nThis saves storage but reduces image quality.\nFor full backups, use Download ZIP first."))return;
+        let compressed=0;
+        for(const r of receipts){
+          if(r.data&&!r.compressed){
+            const ok=await compressReceiptForStorage(r);
+            if(ok)compressed++;
+          }
+        }
+        saveData();render();
+        alert("✓ Compressed "+compressed+" receipt(s)!");
+      }},"🗜 Compress "+fullSizeCount));
+    }
   }
   // Auto-sort
   const uncatCount=receipts.filter(r=>r.folder==="Uncategorized").length;
@@ -4915,11 +5090,10 @@ function renderReceipts(){
         });
         row.addEventListener("mouseenter",()=>{row.style.background="var(--bg3)";});
         row.addEventListener("mouseleave",()=>{row.style.background="transparent";});
-        const thumbSrc=r.data||r.thumb;
-        if(thumbSrc&&r.type&&r.type.startsWith("image")){
-          row.appendChild(h("img",{src:thumbSrc,style:{width:"36px",height:"36px",objectFit:"cover",borderRadius:"6px",border:"1px solid var(--border)"}}));
+        if(r.data&&r.type&&r.type.startsWith("image")){
+          row.appendChild(h("img",{src:r.data,style:{width:"36px",height:"36px",objectFit:"cover",borderRadius:"6px",border:"1px solid var(--border)"}}));
         } else {
-          row.appendChild(h("div",{style:{width:"36px",height:"36px",borderRadius:"6px",background:"var(--bg3)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px"}},"\uD83D\uDCC4"));
+          row.appendChild(h("div",{style:{width:"36px",height:"36px",borderRadius:"6px",background:"var(--bg3)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px"}},r.gDriveId?"☁️":"\uD83D\uDCC4"));
         }
         row.appendChild(h("div",{},
           h("div",{style:{fontSize:"12px",fontWeight:600,color:"var(--cream)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},r.vendor||r.name||"Untitled"),
@@ -4937,9 +5111,10 @@ function renderReceipts(){
           showContextMenu(e,[
             {icon:"👁",label:"Preview",action:()=>{state.modal="receipt_preview";state.editReceiptId=r.id;render();}},
             {icon:"✎",label:"Edit",action:()=>{state.modal="receipt_edit";state.editReceiptId=r.id;render();}},
-            {icon:"📥",label:r.data?"Download":"Already downloaded",action:()=>{
+            {icon:"📥",label:r.data?"Download":(r.gDriveLink?"Open in Drive":"No image"),action:()=>{
               if(r.data){const a=document.createElement("a");a.href=r.data;a.download=receiptFileName(r);a.click();}
-              else alert("Full image was auto-downloaded when you uploaded it. Only a thumbnail is stored in the app.");
+              else if(r.gDriveLink){window.open(r.gDriveLink,"_blank");}
+              else alert("Image was compressed. Full version is in Google Drive if connected.");
             }},
             {divider:true},
             {icon:"🗑",label:"Delete",danger:true,action:()=>{
