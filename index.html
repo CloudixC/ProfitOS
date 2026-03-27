@@ -378,6 +378,7 @@ let state = {
   dark: false,
   view: "ceo",
   activeBiz: "all",
+  taxYear: String(new Date().getFullYear()),
   modal: null,
   editId: null,
   expandedTip: null,
@@ -415,6 +416,7 @@ let state = {
     projects: [],      // {id,name,business,serviceType,revenue,costs:[{desc,amount}],status:"active"|"completed",date}
     targets: { monthly: 0, yearly: 0 },
     assets: [],        // {id,name,business,date,amount,ccaClass,rate,category}
+    taxShelters: { tfsaRoom:7000, tfsaUsed:0, rrspRoom:0, rrspUsed:0, fhsaRoom:8000, fhsaUsed:0, fhsaEligible:true },
   },
   // Forms
   incF: {date:today(),client:"",serviceType:INC_CATS[0],amount:"",business:"b1",paymentMethod:"E-Transfer",paymentHow:"Online",description:"",frequency:"one-time",hstMode:"none"},
@@ -469,24 +471,56 @@ async function loadData(){
   if(!state.data.secureNotes)state.data.secureNotes=[];
   if(!state.data.budgets)state.data.budgets={};
   if(!state.data.targets)state.data.targets={monthly:0,yearly:0};
+  if(!state.data.taxShelters)state.data.taxShelters={tfsaRoom:7000,tfsaUsed:0,rrspRoom:0,rrspUsed:0,fhsaRoom:8000,fhsaUsed:0,fhsaEligible:true};
   try{const r=await window.storage.get(storageKey("cra-theme"));if(r&&r.value==="dark"){state.dark=true;document.documentElement.setAttribute("data-theme","dark");}}catch(e){}
   try{const r=await window.storage.get(storageKey("cra-apikey"));if(r&&r.value){userApiKey=r.value;}}catch(e){}
+  
+  // Load receipt images from split storage
+  for(const receipt of state.data.receipts){
+    if(receipt.imgKey&&!receipt.data){
+      try{
+        const r=await window.storage.get(storageKey(receipt.imgKey));
+        if(r&&r.value)receipt.data=r.value;
+      }catch(e){/* image not found in storage */}
+    }
+  }
+  
   render();
 }
 let _saveWarned=false;
 async function saveData(){
   try{
-    const json=JSON.stringify(state.data);
-    const sizeMB=(json.length/1024/1024).toFixed(1);
-    if(json.length>4500000&&!_saveWarned){console.warn("saveData: data is "+sizeMB+"MB — approaching 5MB limit.");_saveWarned=true;}
-    await window.storage.set(storageKey("cra-v8"),json);
+    // Split receipt images into separate storage keys (each up to 5MB)
+    const receiptImages=[];
+    const strippedReceipts=state.data.receipts.map(r=>{
+      if(r.data&&r.data.length>1000){
+        const imgKey="rimg-"+r.id;
+        receiptImages.push({key:imgKey,data:r.data});
+        return{...r,imgKey:imgKey,data:null};
+      }
+      return{...r};
+    });
+    
+    // Save main data without image blobs
+    const mainData={...state.data,receipts:strippedReceipts};
+    await window.storage.set(storageKey("cra-v8"),JSON.stringify(mainData));
+    
+    // Save each receipt image in its own key
+    for(const img of receiptImages){
+      try{await window.storage.set(storageKey(img.key),img.data);}
+      catch(e){console.error("Image save failed for "+img.key+":",e);}
+    }
   }catch(e){
     console.error("saveData error:",e);
     if(!_saveWarned){
       _saveWarned=true;
-      alert("Storage is getting full ("+((JSON.stringify(state.data).length/1024/1024).toFixed(1))+"MB). Your data still saves but receipt images are taking up space.\n\nTo fix: Go to Export & Backup → Download a backup, then delete old receipts you've already downloaded.");
+      alert("Save error: "+e.message);
     }
   }
+}
+
+async function deleteReceiptImage(receiptId){
+  try{await window.storage.delete(storageKey("rimg-"+receiptId));}catch(e){}
 }
 async function saveTheme(){
   try{await window.storage.set(storageKey("cra-theme"),state.dark?"dark":"light");}catch(e){}
@@ -655,6 +689,8 @@ function getBiz(id){return state.data.businesses.find(x=>x.id===id);}
 
 function getFiltered(){
   let e=state.data.entries;
+  // Tax year filter
+  if(state.taxYear!=="all")e=e.filter(x=>x.date&&x.date.startsWith(state.taxYear));
   if(state.activeBiz!=="all")e=e.filter(x=>x.business===state.activeBiz);
   if(state.filterDateFrom)e=e.filter(x=>x.date>=state.filterDateFrom);
   if(state.filterDateTo)e=e.filter(x=>x.date<=state.filterDateTo);
@@ -664,7 +700,10 @@ function getFiltered(){
 }
 
 function getAllEntries(){
-  return state.activeBiz==="all"?state.data.entries:state.data.entries.filter(x=>x.business===state.activeBiz);
+  let e=state.data.entries;
+  if(state.taxYear!=="all")e=e.filter(x=>x.date&&x.date.startsWith(state.taxYear));
+  if(state.activeBiz!=="all")e=e.filter(x=>x.business===state.activeBiz);
+  return e;
 }
 
 function getStats(){
@@ -721,22 +760,32 @@ function getStats(){
   const oI=sumT(allE.filter(e=>(e.frequency||"one-time")==="one-time"),"income");
   const oE=sumT(allE.filter(e=>(e.frequency||"one-time")==="one-time"),"expense");
   const aI=mI*12+yI+oI,aE=mE*12+yE+oE;
-  const mils=state.activeBiz==="all"?state.data.mileage:state.data.mileage.filter(m=>m.business===state.activeBiz);
+  let mils=state.data.mileage;
+  if(state.taxYear!=="all")mils=mils.filter(m=>m.date&&m.date.startsWith(state.taxYear));
+  if(state.activeBiz!=="all")mils=mils.filter(m=>m.business===state.activeBiz);
   const tKm=mils.reduce((s,m)=>s+Number(m.km),0);
   return{tI,tE,net:tI-tE,hC,hP,hO:hC-hP,mI,mE,oI,oE,aI,aE,aN:aI-aE,tKm,mD:tKm*0.70};
 }
 
 function getTax(){
   const st=getStats();
-  const txbl=Math.max(0,st.aN-st.mD-(state.data.homeOffice>0?st.aE*(state.data.homeOffice/100)*0.3:0));
+  // Use ACTUAL year-to-date net profit, not annualized projection
+  const actualNet=st.tI-st.tE; // real income minus real expenses
+  const deductions=st.mD+(state.data.homeOffice>0?st.tE*(state.data.homeOffice/100)*0.3:0);
+  const txbl=Math.max(0,actualNet-deductions);
   const f=calcTax(txbl,FD_BR),p=calcTax(txbl,ON_BR),t=f+p;
   const corp=Math.min(txbl,500000)*0.122+Math.max(0,txbl-500000)*0.2653;
-  return{txbl,f,p,t,eff:txbl>0?(t/txbl*100):0,after:txbl-t,corp,save:t-corp};
+  // Also calculate projected full-year tax for forecasting
+  const projNet=st.aN; // annualized net (for projection only)
+  const projTxbl=Math.max(0,projNet-deductions);
+  const projT=calcTax(projTxbl,FD_BR)+calcTax(projTxbl,ON_BR);
+  return{txbl,f,p,t,eff:txbl>0?(t/txbl*100):0,after:txbl-t,corp,save:t-corp,projT,projTxbl};
 }
 
 function getBizStats(){
   return state.data.businesses.map(b=>{
-    const be=state.data.entries.filter(e=>e.business===b.id);
+    let be=state.data.entries.filter(e=>e.business===b.id);
+    if(state.taxYear!=="all")be=be.filter(e=>e.date&&e.date.startsWith(state.taxYear));
     const inc=be.filter(e=>e.type==="income").reduce((s,e)=>s+Number(e.amount),0);
     const exp=be.filter(e=>e.type==="expense").reduce((s,e)=>s+Number(e.amount),0);
     return{...b,inc,exp,net:inc-exp};
@@ -766,7 +815,7 @@ function getCatBreakdown(){
 }
 
 function getServiceProfitability(){
-  const entries=state.data.entries;
+  const entries=getAllEntries();
   const byService={};
   entries.filter(e=>e.type==="income").forEach(e=>{
     const svc=e.serviceType||"Other";
@@ -775,7 +824,9 @@ function getServiceProfitability(){
     byService[svc].count++;
   });
   // Also count projects
-  state.data.projects.forEach(p=>{
+  let projects=state.data.projects||[];
+  if(state.taxYear!=="all")projects=projects.filter(p=>p.date&&p.date.startsWith(state.taxYear));
+  projects.forEach(p=>{
     const svc=p.serviceType||"Other";
     if(!byService[svc])byService[svc]={revenue:0,count:0};
   });
@@ -805,7 +856,7 @@ function getCashFlowForecast(){
 
 function getSmartAlerts(){
   const st=getStats();const tx=getTax();const alerts=[];const opps=[];
-  const allE=state.data.entries;const now=new Date();const monthNow=now.getMonth();
+  const allE=getAllEntries();const now=new Date();const monthNow=now.getMonth();
   
   // ─── WARNINGS ───
   const unpaidOwed=state.data.debts.filter(d=>d.direction==="owed_to_me"&&d.status==="unpaid");
@@ -893,11 +944,12 @@ function getSmartAlerts(){
 
 function getSafeToSpend(){
   const st=getStats();const tx=getTax();
-  const cashOnHand=st.net; // current net
-  const taxReserve=tx.t; // estimated tax
-  const hstReserve=Math.max(0,st.hO); // HST owing
-  const safe=cashOnHand-taxReserve-hstReserve;
-  return{cashOnHand,taxReserve,hstReserve,safe};
+  const netProfit=st.net; // actual income minus expenses
+  const taxReserve=tx.t; // estimated tax on taxable income (already accounts for deductions)
+  const hstReserve=Math.max(0,st.hO); // HST owing (ignore if refund)
+  const hstRefund=st.hO<0?Math.abs(st.hO):0;
+  const safe=netProfit-taxReserve-hstReserve+hstRefund;
+  return{netProfit,taxReserve,hstReserve,hstRefund,safe};
 }
 
 // ═══════════════════════════════════════════════════
@@ -1080,16 +1132,51 @@ function deleteLoan(id){state.data.loans=(state.data.loans||[]).filter(l=>l.id!=
 
 function addLoanPayment(loanId,date,amount,note){
   if(!state.data.loans)return;
+  const loan=state.data.loans.find(l=>l.id===loanId);
+  if(!loan)return;
+  
+  const paymentId=uid();
+  const expenseId=uid();
+  
+  // Add payment to loan
   state.data.loans=state.data.loans.map(l=>{
     if(l.id!==loanId)return l;
-    const payments=[...(l.payments||[]),{id:uid(),date:date||today(),amount:Number(amount),note:note||""}];
+    const payments=[...(l.payments||[]),{id:paymentId,date:date||today(),amount:Number(amount),note:note||"",expenseId:expenseId}];
     return{...l,payments};
   });
+  
+  // Create matching expense entry
+  state.data.entries.push({
+    id:expenseId,
+    type:"expense",
+    date:date||today(),
+    amount:Math.round(Number(amount)*100)/100,
+    category:"Bank Fees / Interest",
+    business:loan.business||"b1",
+    description:"Loan: "+loan.name+" — "+(loan.person||"")+(note?" — "+note:""),
+    frequency:"one-time",
+    hstMode:"none",
+    paymentMethod:"E-Transfer",
+    paymentHow:"Online",
+    loanPaymentId:paymentId,
+    loanId:loanId
+  });
+  
   saveData();render();
 }
 
 function deleteLoanPayment(loanId,paymentId){
   if(!state.data.loans)return;
+  // Find the payment to get its linked expense
+  const loan=state.data.loans.find(l=>l.id===loanId);
+  if(loan){
+    const payment=(loan.payments||[]).find(p=>p.id===paymentId);
+    if(payment&&payment.expenseId){
+      // Remove linked expense
+      state.data.entries=state.data.entries.filter(e=>e.id!==payment.expenseId);
+    }
+  }
+  // Remove payment from loan
   state.data.loans=state.data.loans.map(l=>{
     if(l.id!==loanId)return l;
     return{...l,payments:(l.payments||[]).filter(p=>p.id!==paymentId)};
@@ -1297,6 +1384,20 @@ function h(tag,attrs,...children){
 }
 function iconHTML(name,size){size=size||18;return '<img src="'+(ICONS[name]||"")+'" style="width:'+size+'px;height:'+size+'px;vertical-align:middle;display:inline-block" />';}
 
+// Create overlay that only closes on clean clicks — not when dragging to select text
+function makeOverlay(onClose){
+  let mouseDownTarget=null;
+  const overlay=h("div",{className:"overlay"});
+  overlay.addEventListener("mousedown",e=>{mouseDownTarget=e.target;});
+  overlay.addEventListener("mouseup",e=>{
+    // Only close if both mousedown AND mouseup happened on the overlay itself
+    if(e.target===overlay&&mouseDownTarget===overlay){
+      onClose();
+    }
+    mouseDownTarget=null;
+  });
+  return overlay;
+}
 function statCard(label,value,color){
   return h("div",{className:"stat-card"},
     h("div",{className:"stat-label"},label),
@@ -1304,19 +1405,47 @@ function statCard(label,value,color){
   );
 }
 
+// Category colours — each expense category gets its own distinct colour
+const CAT_COLORS={
+  "Equipment (Camera/Gear)":"#e07030",
+  "Software / Digital Tools":"#7c4dff",
+  "Subcontractors":"#00897b",
+  "Rent / Studio":"#5c6bc0",
+  "Office Expenses":"#8d6e63",
+  "Phone / Internet":"#039be5",
+  "Insurance":"#546e7a",
+  "Vehicle":"#43a047",
+  "Travel":"#f4511e",
+  "Meals & Entertainment":"#fb8c00",
+  "Payroll / Wages":"#3949ab",
+  "Accounting / Legal":"#6d4c41",
+  "Advertising / Marketing":"#e91e63",
+  "Home Office":"#8e24aa",
+  "Bank Fees / Interest":"#78909c",
+  "Training / Education":"#00acc1",
+  "Inventory / COGS":"#7cb342",
+  "Repairs & Maintenance":"#ff7043",
+  "Other Expense":"#9e9e9e",
+};
+function catColor(cat){return CAT_COLORS[cat]||"#9e9e9e";}
+
 function entryRow(e){
   const biz=getBiz(e.business);
   const total=entryTotal(e);
   const hst=entryHST(e);
   const showHstBreakdown=e.hstMode&&e.hstMode!=="none"&&hst>0;
+  const hasReceipt=e.receiptId&&state.data.receipts.some(r=>r.id===e.receiptId);
+  const cat=e.type==="expense"?(e.category||"Other Expense"):null;
+  const cc=cat?catColor(cat):null;
   return h("div",{className:"row"},
     h("div",{style:{flex:1}},
-      h("div",{style:{display:"flex",alignItems:"center",gap:"8px"}},
-        h("span",{style:{color:biz?biz.color:"#999",fontSize:"12px"}},biz?biz.icon:"●"),
+      h("div",{style:{display:"flex",alignItems:"center",gap:"8px",flexWrap:"wrap"}},
+        cc?h("span",{style:{fontSize:"10px",padding:"2px 8px",borderRadius:"5px",background:cc+"20",color:cc,fontWeight:700,whiteSpace:"nowrap",border:"1px solid "+cc+"33"}},cat):h("span",{style:{color:biz?biz.color:"#999",fontSize:"12px"}},biz?biz.icon:"●"),
         h("span",{style:{fontSize:"13px",fontWeight:600}},e.client||e.description||(e.type==="income"?e.serviceType:e.category)),
-        h("span",{className:`freq-badge ${e.frequency==="monthly"?"freq-monthly":"freq-onetime"}`},e.frequency==="monthly"?"Monthly":"One-Time")
+        h("span",{className:`freq-badge ${e.frequency==="monthly"?"freq-monthly":"freq-onetime"}`},e.frequency==="monthly"?"Monthly":"One-Time"),
+        hasReceipt?h("span",{style:{cursor:"pointer",fontSize:"13px",opacity:.7,title:"View receipt"},onClick:(ev)=>{ev.stopPropagation();state.modal="receipt_preview";state.editReceiptId=e.receiptId;render();}},"🧾"):null
       ),
-      h("div",{style:{fontSize:"11px",color:"var(--dark)",marginTop:"2px"}},(e.type==="income"?e.serviceType:e.category)+" • "+e.date+(e.paymentMethod?" • "+e.paymentMethod:"")+(e.paymentHow?" ("+e.paymentHow+")":""))
+      h("div",{style:{fontSize:"11px",color:"var(--dark)",marginTop:"2px"}},(biz?biz.icon+" "+biz.name+" • ":"")+(e.type==="income"?e.serviceType:e.category)+" • "+e.date+(e.paymentMethod?" • "+e.paymentMethod:"")+(e.paymentHow?" ("+e.paymentHow+")":""))
     ),
     h("div",{style:{display:"flex",alignItems:"center",gap:"10px"}},
       h("div",{style:{textAlign:"right"}},
@@ -1524,7 +1653,7 @@ function renderCEO(){
     {label:"Total Income",value:fmt(st.tI),bg1:"#6ab88a",bg2:"#8ecaa8"},
     {label:"Total Expenses",value:fmt(st.tE),bg1:"#c87878",bg2:"#d89898"},
     {label:"Net Profit",value:fmt(st.net),bg1:st.net>=0?"#6ab88a":"#c87878",bg2:st.net>=0?"#8ecaa8":"#d89898"},
-    {label:"Est. Tax",value:fmt(tx.t),bg1:"#c89868",bg2:"#d8b088"},
+    {label:"Income Tax",value:fmt(tx.t),bg1:"#c89868",bg2:"#d8b088"},
     {label:st.hO>=0?"HST Owing":"HST Refund",value:fmt(Math.abs(st.hO)),bg1:st.hO>=0?"#c89868":"#6ab88a",bg2:st.hO>=0?"#d8b088":"#8ecaa8"},
   ];
   
@@ -1555,18 +1684,292 @@ function renderCEO(){
   heroGrid.appendChild(safe);
   els.push(heroGrid);
   
-  // ─── MATH EQUATION BAR ───
-  const mathBar=h("div",{className:"math-equation"});
-  [{v:fmt(st.tI),c:"var(--pg)",l:"Income"},{op:"−"},{v:fmt(st.tE),c:"var(--pr)",l:"Expenses"},{op:"−"},{v:fmt(tx.t),c:"var(--po)",l:"Tax"},{op:"−"},{v:fmt(Math.abs(st.hO)),c:"var(--po)",l:"HST"},{op:"="},{v:fmt(safeData.safe),c:safeData.safe>=0?"var(--pg)":"var(--pr)",l:"Yours to Keep",result:true}].forEach(item=>{
-    if(item.op){mathBar.appendChild(h("span",{className:"math-op"},item.op));}
+  // ─── MATH EQUATION BAR — DETAILED ───
+  const mathWrap=h("div",{style:{background:"var(--bg2)",borderRadius:"14px",padding:"16px 20px",marginBottom:"16px",border:"1px solid var(--border)"}});
+  
+  // Line 1: Income - Expenses = Net Profit
+  const line1=h("div",{style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"8px",flexWrap:"wrap",marginBottom:"12px"}});
+  [{v:fmt(st.tI),c:"var(--pg)",l:"Income"},{op:"−"},{v:fmt(st.tE),c:"var(--pr)",l:"Expenses"},{op:"="},{v:fmt(st.net),c:st.net>=0?"var(--pg)":"var(--pr)",l:"Net Profit"}].forEach(item=>{
+    if(item.op){line1.appendChild(h("span",{style:{fontSize:"14px",color:"var(--dim)",fontWeight:600,padding:"0 2px"}},item.op));}
     else{
-      const block=h("div",{className:`math-block ${item.result?"math-result":""}`});
-      block.appendChild(h("div",{className:"mb-val mn",style:{fontSize:item.result?"18px":"13px",color:item.c}},item.v));
-      block.appendChild(h("div",{className:"mb-lbl"},item.l));
-      mathBar.appendChild(block);
+      const block=h("div",{style:{textAlign:"center"}});
+      block.appendChild(h("div",{className:"mn",style:{fontSize:"14px",fontWeight:700,color:item.c}},item.v));
+      block.appendChild(h("div",{style:{fontSize:"9px",color:"var(--dim)",textTransform:"uppercase",letterSpacing:".5px",fontWeight:600}},item.l));
+      line1.appendChild(block);
     }
   });
-  els.push(mathBar);
+  mathWrap.appendChild(line1);
+  
+  // Divider
+  mathWrap.appendChild(h("div",{style:{height:"1px",background:"var(--border)",margin:"0 20px 12px"}}));
+  
+  // Line 2: Net Profit - Deductions - Tax - HST = Yours to Keep
+  const deductions=st.mD+(state.data.homeOffice>0?st.tE*(state.data.homeOffice/100)*0.3:0);
+  const line2=h("div",{style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"8px",flexWrap:"wrap"}});
+  const line2Items=[
+    {v:fmt(st.net),c:st.net>=0?"var(--pg)":"var(--pr)",l:"Net Profit"},
+  ];
+  if(deductions>0){
+    line2Items.push({op:"−"});
+    line2Items.push({v:fmt(deductions),c:"var(--pb)",l:"Deductions"+(st.mD>0?" (KM)":"")});
+  }
+  line2Items.push({op:"−"});
+  line2Items.push({v:fmt(tx.t),c:"var(--po)",l:"Income Tax ("+tx.eff.toFixed(0)+"%)"});
+  if(st.hO>0){
+    line2Items.push({op:"−"});
+    line2Items.push({v:fmt(st.hO),c:"var(--po)",l:"HST Owing"});
+  } else if(st.hO<0){
+    line2Items.push({op:"+"});
+    line2Items.push({v:fmt(Math.abs(st.hO)),c:"var(--pg)",l:"HST Refund"});
+  }
+  line2Items.push({op:"="});
+  line2Items.push({v:fmt(safeData.safe),c:safeData.safe>=0?"var(--pg)":"var(--pr)",l:"Yours to Keep",big:true});
+  
+  line2Items.forEach(item=>{
+    if(item.op){line2.appendChild(h("span",{style:{fontSize:"14px",color:"var(--dim)",fontWeight:600,padding:"0 2px"}},item.op));}
+    else{
+      const block=h("div",{style:{textAlign:"center"}});
+      block.appendChild(h("div",{className:"mn",style:{fontSize:item.big?"20px":"14px",fontWeight:item.big?800:700,color:item.c}},item.v));
+      block.appendChild(h("div",{style:{fontSize:"9px",color:"var(--dim)",textTransform:"uppercase",letterSpacing:".5px",fontWeight:600}},item.l));
+      line2.appendChild(block);
+    }
+  });
+  mathWrap.appendChild(line2);
+  
+  // Divider
+  mathWrap.appendChild(h("div",{style:{height:"1px",background:"var(--border)",margin:"12px 20px"}}));
+  
+  // Line 3: Tax breakdown — how the income tax is calculated
+  const taxDetail=h("div",{style:{display:"flex",gap:"16px",justifyContent:"center",flexWrap:"wrap",alignItems:"flex-start"}});
+  
+  // Federal tax breakdown
+  const fedBox=h("div",{style:{textAlign:"center",minWidth:"140px"}});
+  fedBox.appendChild(h("div",{style:{fontSize:"9px",color:"var(--dim)",textTransform:"uppercase",letterSpacing:".5px",fontWeight:700,marginBottom:"4px"}},"Federal Tax"));
+  fedBox.appendChild(h("div",{className:"mn",style:{fontSize:"14px",fontWeight:700,color:"var(--po)",marginBottom:"4px"}},fmt(tx.f)));
+  // Show bracket used
+  const fedRate=tx.txbl<=55867?"15%":tx.txbl<=111733?"15-20.5%":tx.txbl<=154906?"15-26%":"15-29%+";
+  fedBox.appendChild(h("div",{style:{fontSize:"10px",color:"var(--dim)"}},fmt(tx.txbl)+" × "+fedRate));
+  taxDetail.appendChild(fedBox);
+  
+  taxDetail.appendChild(h("span",{style:{fontSize:"16px",color:"var(--dim)",fontWeight:600,alignSelf:"center"}},"+"));
+  
+  // Ontario tax breakdown
+  const onBox=h("div",{style:{textAlign:"center",minWidth:"140px"}});
+  onBox.appendChild(h("div",{style:{fontSize:"9px",color:"var(--dim)",textTransform:"uppercase",letterSpacing:".5px",fontWeight:700,marginBottom:"4px"}},"Ontario Tax"));
+  onBox.appendChild(h("div",{className:"mn",style:{fontSize:"14px",fontWeight:700,color:"var(--po)",marginBottom:"4px"}},fmt(tx.p)));
+  const onRate=tx.txbl<=51446?"5.05%":tx.txbl<=102894?"5.05-9.15%":tx.txbl<=150000?"5.05-11.16%":"5.05-12.16%+";
+  onBox.appendChild(h("div",{style:{fontSize:"10px",color:"var(--dim)"}},fmt(tx.txbl)+" × "+onRate));
+  taxDetail.appendChild(onBox);
+  
+  taxDetail.appendChild(h("span",{style:{fontSize:"16px",color:"var(--dim)",fontWeight:600,alignSelf:"center"}},"="));
+  
+  // Total
+  const totalBox=h("div",{style:{textAlign:"center",minWidth:"140px"}});
+  totalBox.appendChild(h("div",{style:{fontSize:"9px",color:"var(--dim)",textTransform:"uppercase",letterSpacing:".5px",fontWeight:700,marginBottom:"4px"}},"Total Income Tax"));
+  totalBox.appendChild(h("div",{className:"mn",style:{fontSize:"16px",fontWeight:800,color:"var(--po)",marginBottom:"4px"}},fmt(tx.t)));
+  totalBox.appendChild(h("div",{style:{fontSize:"10px",color:"var(--dim)"}},"Effective rate: "+tx.eff.toFixed(1)+"%"));
+  taxDetail.appendChild(totalBox);
+  
+  // HST breakdown
+  if(st.hC>0||st.hP>0){
+    taxDetail.appendChild(h("div",{style:{width:"1px",height:"40px",background:"var(--border)",alignSelf:"center",margin:"0 8px"}}));
+    const hstBox=h("div",{style:{textAlign:"center",minWidth:"140px"}});
+    hstBox.appendChild(h("div",{style:{fontSize:"9px",color:"var(--dim)",textTransform:"uppercase",letterSpacing:".5px",fontWeight:700,marginBottom:"4px"}},"HST (13%)"));
+    hstBox.appendChild(h("div",{className:"mn",style:{fontSize:"14px",fontWeight:700,color:st.hO>=0?"var(--po)":"var(--pg)",marginBottom:"4px"}},st.hO>=0?fmt(st.hO):"−"+fmt(Math.abs(st.hO))));
+    hstBox.appendChild(h("div",{style:{fontSize:"10px",color:"var(--dim)"}},fmt(st.hC)+" collected − "+fmt(st.hP)+" paid"));
+    taxDetail.appendChild(hstBox);
+  }
+  
+  mathWrap.appendChild(taxDetail);
+  
+  // Divider
+  mathWrap.appendChild(h("div",{style:{height:"1px",background:"var(--border)",margin:"12px 20px"}}));
+  
+  // Line 4: Total owing to CRA
+  const totalCRA=tx.t+Math.max(0,st.hO);
+  const craLine=h("div",{style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"12px",flexWrap:"wrap"}});
+  
+  const craItems=[
+    {v:fmt(tx.t),c:"var(--po)",l:"Income Tax"},
+    {op:"+"},
+    {v:fmt(Math.max(0,st.hO)),c:"var(--po)",l:"HST Owing"},
+    {op:"="},
+    {v:fmt(totalCRA),c:"#c0392b",l:"Total Owing to CRA",big:true},
+  ];
+  
+  craItems.forEach(item=>{
+    if(item.op){craLine.appendChild(h("span",{style:{fontSize:"16px",color:"var(--dim)",fontWeight:600}},item.op));}
+    else{
+      const block=h("div",{style:{textAlign:"center"}});
+      block.appendChild(h("div",{className:"mn",style:{fontSize:item.big?"22px":"14px",fontWeight:item.big?800:700,color:item.c}},item.v));
+      block.appendChild(h("div",{style:{fontSize:item.big?"10px":"9px",color:item.big?"#c0392b":"var(--dim)",textTransform:"uppercase",letterSpacing:".5px",fontWeight:700}},item.l));
+      craLine.appendChild(block);
+    }
+  });
+  
+  mathWrap.appendChild(craLine);
+  
+  // ─── NEXT TAX BRACKET INDICATOR ───
+  if(tx.txbl>0){
+    mathWrap.appendChild(h("div",{style:{height:"1px",background:"var(--border)",margin:"12px 20px"}}));
+    
+    // Find current and next federal bracket
+    let curFedRate=0,nextFedRate=0,nextFedAt=0,fedRoom=0;
+    for(const b of FD_BR){
+      if(tx.txbl>=b.n&&tx.txbl<b.x){curFedRate=b.r;fedRoom=b.x-tx.txbl;break;}
+    }
+    for(const b of FD_BR){
+      if(b.n>tx.txbl){nextFedRate=b.r;nextFedAt=b.n;break;}
+    }
+    
+    // Find current and next Ontario bracket
+    let curOnRate=0,nextOnRate=0,nextOnAt=0,onRoom=0;
+    for(const b of ON_BR){
+      if(tx.txbl>=b.n&&tx.txbl<b.x){curOnRate=b.r;onRoom=b.x-tx.txbl;break;}
+    }
+    for(const b of ON_BR){
+      if(b.n>tx.txbl){nextOnRate=b.r;nextOnAt=b.n;break;}
+    }
+    
+    const combinedCurrent=(curFedRate+curOnRate)*100;
+    const room=Math.min(fedRoom,onRoom);
+    const nextAt=Math.min(nextFedAt||Infinity,nextOnAt||Infinity);
+    
+    // Which bracket jumps first?
+    let nextCombined=0,nextTrigger=0,nextLabel="";
+    if(nextFedAt&&nextOnAt){
+      if(nextFedAt<=nextOnAt){
+        nextCombined=(nextFedRate+curOnRate)*100;
+        nextTrigger=nextFedAt;
+        nextLabel="Federal jumps to "+(nextFedRate*100).toFixed(1)+"%, Ontario stays at "+(curOnRate*100).toFixed(2)+"%";
+      } else {
+        nextCombined=(curFedRate+nextOnRate)*100;
+        nextTrigger=nextOnAt;
+        nextLabel="Ontario jumps to "+(nextOnRate*100).toFixed(2)+"%, Federal stays at "+(curFedRate*100).toFixed(1)+"%";
+      }
+    } else if(nextFedAt){
+      nextCombined=(nextFedRate+curOnRate)*100;
+      nextTrigger=nextFedAt;
+      nextLabel="Federal jumps to "+(nextFedRate*100).toFixed(1)+"%";
+    } else if(nextOnAt){
+      nextCombined=(curFedRate+nextOnRate)*100;
+      nextTrigger=nextOnAt;
+      nextLabel="Ontario jumps to "+(nextOnRate*100).toFixed(2)+"%";
+    }
+    
+    const bracketBox=h("div",{style:{padding:"12px 16px",background:"var(--bg)",borderRadius:"10px",border:"1px solid var(--border)"}});
+    
+    // Current bracket
+    const curRow=h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"8px"}});
+    curRow.appendChild(h("div",{},
+      h("div",{style:{fontSize:"12px",fontWeight:700,color:"var(--cream)"}},"Current Bracket: "+combinedCurrent.toFixed(1)+"% combined"),
+      h("div",{style:{fontSize:"10px",color:"var(--dim)"}},"Federal "+(curFedRate*100).toFixed(1)+"% + Ontario "+(curOnRate*100).toFixed(2)+"% on income up to "+fmt(Math.min(FD_BR.find(b=>tx.txbl<b.x)?.x||0,ON_BR.find(b=>tx.txbl<b.x)?.x||0)))
+    ));
+    curRow.appendChild(h("div",{style:{fontSize:"11px",fontWeight:700,color:"var(--pg)"}},fmt(room)+" room left"));
+    bracketBox.appendChild(curRow);
+    
+    // Progress bar to next bracket
+    if(nextTrigger&&nextTrigger<Infinity){
+      const pct=Math.min(100,Math.round((tx.txbl/nextTrigger)*100));
+      const barWrap=h("div",{style:{marginBottom:"8px"}});
+      const barBg=h("div",{style:{height:"6px",borderRadius:"3px",background:"var(--border)",overflow:"hidden"}});
+      barBg.appendChild(h("div",{style:{height:"100%",width:pct+"%",borderRadius:"3px",background:pct>80?"var(--po)":"var(--pg)",transition:"width .3s"}}));
+      barWrap.appendChild(barBg);
+      barWrap.appendChild(h("div",{style:{display:"flex",justifyContent:"space-between",fontSize:"9px",color:"var(--dim)",marginTop:"3px"}},
+        h("span",{},fmt(tx.txbl)+" earned"),
+        h("span",{},fmt(nextTrigger)+" next bracket")
+      ));
+      bracketBox.appendChild(barWrap);
+      
+      // Next bracket info
+      const nextRow=h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center"}});
+      nextRow.appendChild(h("div",{},
+        h("div",{style:{fontSize:"12px",fontWeight:700,color:"var(--po)"}},"Next Bracket: "+nextCombined.toFixed(1)+"% combined"),
+        h("div",{style:{fontSize:"10px",color:"var(--dim)"}},nextLabel)
+      ));
+      const extraPerDollar=((nextCombined-combinedCurrent)/100);
+      nextRow.appendChild(h("div",{style:{textAlign:"right"}},
+        h("div",{style:{fontSize:"11px",fontWeight:700,color:"var(--po)"}},"+" +(nextCombined-combinedCurrent).toFixed(1)+"¢ per dollar"),
+        h("div",{style:{fontSize:"10px",color:"var(--dim)"}},"Kicks in at "+fmt(nextTrigger))
+      ));
+      bracketBox.appendChild(nextRow);
+    }
+    
+    mathWrap.appendChild(bracketBox);
+    
+    // ─── TAX SHELTER OPTIMIZATION ───
+    const ts=state.data.taxShelters;
+    const shelterBox=h("div",{style:{marginTop:"12px",padding:"14px 16px",background:"var(--bg)",borderRadius:"10px",border:"1px solid var(--border)"}});
+    shelterBox.appendChild(h("div",{style:{fontSize:"12px",fontWeight:700,color:"var(--gold)",marginBottom:"10px",display:"flex",justifyContent:"space-between",alignItems:"center"}},
+      h("span",{},"Tax Shelters — Keep More Money"),
+      h("button",{className:"btn btn-ghost",style:{fontSize:"10px",padding:"3px 8px"},onClick:()=>{state.modal="tax_shelters";render();}},"Edit Amounts")
+    ));
+    
+    const combinedRate=(curFedRate+curOnRate);
+    const rrspLimit=Math.min(Math.round(st.tI*0.18),31560);
+    const rrspRoom=ts.rrspRoom>0?ts.rrspRoom:rrspLimit;
+    const rrspRemaining=Math.max(0,rrspRoom-ts.rrspUsed);
+    
+    const shelters=[
+      {name:"RRSP",room:rrspRoom,used:ts.rrspUsed,remaining:rrspRemaining,color:"#3949ab",deductible:true,
+        desc:"Deducts from taxable income — saves "+fmt(rrspRemaining*combinedRate)+" in tax if you max it",
+        tip:rrspRemaining>0?"Contributing "+fmt(rrspRemaining)+" would drop your taxable income to "+fmt(Math.max(0,tx.txbl-rrspRemaining)):"Maxed out!"},
+      {name:"TFSA",room:ts.tfsaRoom||7000,used:ts.tfsaUsed,remaining:Math.max(0,(ts.tfsaRoom||7000)-ts.tfsaUsed),color:"#00897b",deductible:false,
+        desc:"No tax deduction, but all growth & withdrawals are tax-free forever",
+        tip:"Doesn't lower your bracket, but shelters investment gains from tax"},
+    ];
+    if(ts.fhsaEligible){
+      shelters.push({name:"FHSA",room:ts.fhsaRoom||8000,used:ts.fhsaUsed,remaining:Math.max(0,(ts.fhsaRoom||8000)-ts.fhsaUsed),color:"#8e24aa",deductible:true,
+        desc:"Best of both — deductible like RRSP AND tax-free like TFSA for first home",
+        tip:ts.fhsaUsed<(ts.fhsaRoom||8000)?"Contributing "+fmt(Math.max(0,(ts.fhsaRoom||8000)-ts.fhsaUsed))+" saves "+fmt(Math.max(0,(ts.fhsaRoom||8000)-ts.fhsaUsed)*combinedRate)+" in tax":"Maxed out!"});
+    }
+    
+    // Calculate total potential tax savings from deductible accounts
+    const totalDeductibleRoom=shelters.filter(s=>s.deductible).reduce((sum,s)=>sum+s.remaining,0);
+    const totalPotentialSavings=totalDeductibleRoom*combinedRate;
+    
+    if(totalPotentialSavings>0){
+      shelterBox.appendChild(h("div",{style:{fontSize:"11px",color:"var(--pg)",fontWeight:600,marginBottom:"10px",padding:"6px 10px",background:"var(--pg)12",borderRadius:"6px",border:"1px solid var(--pg)22"}},
+        "You could save up to "+fmt(totalPotentialSavings)+" in taxes by maxing your RRSP"+(ts.fhsaEligible?" + FHSA":"")+" contributions"
+      ));
+    }
+    
+    shelters.forEach(s=>{
+      const pct=s.room>0?Math.min(100,Math.round(s.used/s.room*100)):0;
+      const row=h("div",{style:{marginBottom:"10px"}});
+      
+      // Header
+      const hdr=h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"3px"}});
+      hdr.appendChild(h("div",{style:{display:"flex",alignItems:"center",gap:"6px"}},
+        h("span",{style:{fontSize:"12px",fontWeight:700,color:s.color}},s.name),
+        s.deductible?h("span",{style:{fontSize:"8px",padding:"1px 5px",borderRadius:"3px",background:s.color+"20",color:s.color,fontWeight:700}},"DEDUCTIBLE"):h("span",{style:{fontSize:"8px",padding:"1px 5px",borderRadius:"3px",background:"var(--dim)20",color:"var(--dim)",fontWeight:700}},"TAX-FREE GROWTH")
+      ));
+      hdr.appendChild(h("span",{style:{fontSize:"11px",color:"var(--dim)"}},fmt(s.used)+" / "+fmt(s.room)+" used"));
+      row.appendChild(hdr);
+      
+      // Progress bar
+      const barBg=h("div",{style:{height:"6px",borderRadius:"3px",background:"var(--border)",overflow:"hidden",marginBottom:"3px"}});
+      barBg.appendChild(h("div",{style:{height:"100%",width:pct+"%",borderRadius:"3px",background:s.color,transition:"width .3s"}}));
+      row.appendChild(barBg);
+      
+      // Info line
+      const infoLine=h("div",{style:{display:"flex",justifyContent:"space-between",fontSize:"10px"}});
+      infoLine.appendChild(h("span",{style:{color:"var(--dim)"}},s.desc));
+      infoLine.appendChild(h("span",{style:{color:s.remaining>0?s.color:"var(--pg)",fontWeight:600,whiteSpace:"nowrap",marginLeft:"8px"}},s.remaining>0?fmt(s.remaining)+" room left":"✓ Maxed"));
+      row.appendChild(infoLine);
+      
+      // Tax tip
+      if(s.tip&&s.remaining>0){
+        row.appendChild(h("div",{style:{fontSize:"10px",color:s.deductible?"var(--pg)":"var(--dim)",marginTop:"2px",fontStyle:"italic"}},s.tip));
+      }
+      
+      shelterBox.appendChild(row);
+    });
+    
+    mathWrap.appendChild(shelterBox);
+  }
+  
+  els.push(mathWrap);
   
   // ─── ALERTS + OPPORTUNITIES + BUDGET WARNINGS ───
   const budgetWarnings=getBudgetStatus().filter(b=>b.pct>=80);
@@ -2439,7 +2842,9 @@ function renderRecurring(){
 
 function renderMileage(){
   const st=getStats();
-  const mils=state.activeBiz==="all"?state.data.mileage:state.data.mileage.filter(m=>m.business===state.activeBiz);
+  let mils=state.data.mileage;
+  if(state.taxYear!=="all")mils=mils.filter(m=>m.date&&m.date.startsWith(state.taxYear));
+  if(state.activeBiz!=="all")mils=mils.filter(m=>m.business===state.activeBiz);
   const els=[];
   const stats=h("div",{className:"grid-3 mb-18"});
   stats.appendChild(statCard("Total KM",st.tKm.toLocaleString(),"var(--pb)"));
@@ -3399,9 +3804,8 @@ function renderBreakEven(){
 }
 
 function renderYearEnd(){
-  const allEntries=state.data.entries;
-  const year=new Date().getFullYear();
-  const yearEntries=allEntries.filter(e=>new Date(e.date).getFullYear()===year);
+  const year=state.taxYear!=="all"?parseInt(state.taxYear):new Date().getFullYear();
+  const yearEntries=state.data.entries.filter(e=>e.date&&e.date.startsWith(String(year)));
   const totalInc=yearEntries.filter(e=>e.type==="income").reduce((s,e)=>s+Number(e.amount),0);
   const totalExp=yearEntries.filter(e=>e.type==="expense").reduce((s,e)=>s+Number(e.amount),0);
   const netProfit=totalInc-totalExp;
@@ -3434,7 +3838,7 @@ function renderYearEnd(){
 
   const hstCollected=yearEntries.filter(e=>e.type==="income"&&e.hstMode&&e.hstMode!=="none").reduce((s,e)=>s+Number(e.amount)*0.13/1.13,0);
   const hstPaid=yearEntries.filter(e=>e.type==="expense"&&e.hstMode&&e.hstMode!=="none").reduce((s,e)=>s+Number(e.amount)*0.13/1.13,0);
-  const mileageKm=state.data.mileage.reduce((s,m)=>s+Number(m.km),0);
+  const mileageKm=state.data.mileage.filter(m=>m.date&&m.date.startsWith(String(year))).reduce((s,m)=>s+Number(m.km),0);
 
   const els=[];
   els.push(h("h2",{style:{fontFamily:"var(--heading)",fontSize:"22px",fontWeight:700,marginBottom:"4px"}},""+ year+" Year-End Summary"));
@@ -3652,7 +4056,7 @@ function renderModal(){
   if(state.modal==="receipt_preview"&&state.editReceiptId){
     const r=state.data.receipts.find(x=>x.id===state.editReceiptId);
     if(!r){state.modal=null;return null;}
-    const overlay=h("div",{className:"overlay",onClick:e=>{if(e.target===e.currentTarget){state.modal=null;render();}}});
+    const overlay=makeOverlay(()=>{state.modal=null;render();});
     const win=h("div",{style:{background:"var(--bg)",borderRadius:"14px",width:"90%",maxWidth:"800px",maxHeight:"90vh",margin:"20px auto",overflow:"hidden",border:"1px solid var(--border)",boxShadow:"0 8px 40px rgba(0,0,0,.3)",display:"flex",flexDirection:"column"}});
     // Title bar
     const tb=h("div",{style:{display:"flex",alignItems:"center",gap:"10px",padding:"10px 16px",background:"var(--bg2)",borderBottom:"1px solid var(--border)",flexShrink:0}});
@@ -3673,14 +4077,8 @@ function renderModal(){
     const imgArea=h("div",{style:{flex:1,overflow:"auto",display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",background:"#111"}});
     if(r.data&&r.type&&r.type.startsWith("image")){
       imgArea.appendChild(h("img",{src:r.data,style:{maxWidth:"100%",maxHeight:"70vh",borderRadius:"8px",boxShadow:"0 4px 20px rgba(0,0,0,.4)"}}));
-    } else if(r.gDriveLink){
-      imgArea.appendChild(h("div",{style:{textAlign:"center",color:"#888",padding:"40px"}},
-        h("div",{style:{fontSize:"48px",marginBottom:"8px"}},"☁️"),
-        h("div",{style:{marginBottom:"12px"}},"Stored in Google Drive"),
-        h("a",{href:r.gDriveLink,target:"_blank",style:{color:"var(--pb)",textDecoration:"underline",fontSize:"13px"}},"Open in Google Drive ↗")
-      ));
     } else {
-      imgArea.appendChild(h("div",{style:{textAlign:"center",color:"#888",padding:"40px"}},h("div",{style:{fontSize:"48px",marginBottom:"8px"}},"📄"),h("div",{},"PDF — download to view")));
+      imgArea.appendChild(h("div",{style:{textAlign:"center",color:"#888",padding:"40px"}},h("div",{style:{fontSize:"48px",marginBottom:"8px"}},"📄"),h("div",{},r.type&&r.type.startsWith("image")?"Image loading...":"PDF — download to view")));
     }
     win.appendChild(imgArea);
     // Info bar
@@ -3702,7 +4100,7 @@ function renderModal(){
   if(state.modal==="receipt_edit"&&state.editReceiptId){
     const r=state.data.receipts.find(x=>x.id===state.editReceiptId);
     if(!r){state.modal=null;return null;}
-    const overlay=h("div",{className:"overlay",onClick:e=>{if(e.target===e.currentTarget){state.modal=null;render();}}});
+    const overlay=makeOverlay(()=>{state.modal=null;render();});
     const modal=h("div",{className:"modal",style:{maxWidth:"500px"}});
     modal.appendChild(h("h3",{style:{fontFamily:"var(--heading)",fontSize:"18px",fontWeight:700,color:"var(--gold)",marginBottom:"16px"}},"Edit Receipt"));
     
@@ -3751,18 +4149,116 @@ function renderModal(){
     notesInp.addEventListener("input",(e)=>{r.notes=e.target.value;});
     modal.appendChild(notesInp);
     
-    // Log as expense
-    modal.appendChild(h("div",{style:{marginTop:"10px",padding:"10px",borderRadius:"8px",background:"var(--bg3)",border:"1px solid var(--border)"}},
-      h("div",{style:{fontSize:"11px",color:"var(--muted)",marginBottom:"6px"}},"Quick: Log as expense from this receipt"),
-      h("button",{className:"btn btn-gold",style:{fontSize:"12px"},onClick:()=>{
+    // Expense linking
+    const expenseBox=h("div",{style:{marginTop:"10px",padding:"10px",borderRadius:"8px",background:"var(--bg3)",border:"1px solid var(--border)"}});
+    
+    // Check if already linked
+    const linkedExpense=r.expenseId?state.data.entries.find(e=>e.id===r.expenseId):null;
+    
+    if(linkedExpense){
+      expenseBox.appendChild(h("div",{style:{fontSize:"11px",color:"var(--pg)",fontWeight:600,marginBottom:"6px"}},"✓ Linked to expense"));
+      expenseBox.appendChild(h("div",{style:{fontSize:"12px",color:"var(--cream)",marginBottom:"6px"}},
+        (linkedExpense.description||linkedExpense.category||"Expense")+" — "+fmt(linkedExpense.amount)+" • "+linkedExpense.date
+      ));
+      expenseBox.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"4px 10px"},onClick:()=>{
+        // Unlink
+        delete linkedExpense.receiptId;
+        delete r.expenseId;
+        saveData();render();
+      }},"Unlink"));
+    } else {
+      expenseBox.appendChild(h("div",{style:{fontSize:"11px",color:"var(--muted)",marginBottom:"8px"}},"Link to an expense"));
+      
+      const expBtnRow=h("div",{style:{display:"flex",gap:"6px",flexWrap:"wrap"}});
+      
+      // Create new expense
+      expBtnRow.appendChild(h("button",{className:"btn btn-gold",style:{fontSize:"11px",padding:"5px 12px"},onClick:()=>{
         if(r.amount&&Number(r.amount)>0){
-          state.data.entries.push({id:uid(),type:"expense",date:r.date||today(),amount:Math.round(Number(r.amount)*100)/100,
-            category:r.category||r.folder||"Other Expense",business:r.business||"b1",description:(r.vendor||"Receipt")+" — "+r.name,
-            frequency:"one-time",hstMode:"none",paymentMethod:"Debit Card",paymentHow:"In Person"});
-          saveData();alert("Logged as expense!");
+          const expId=uid();
+          state.data.entries.push({id:expId,type:"expense",date:r.date||today(),amount:Math.round(Number(r.amount)*100)/100,
+            category:r.category||r.folder||"Other Expense",business:r.business||"b1",description:(r.vendor||"Receipt")+" — "+(r.name||""),
+            frequency:"one-time",hstMode:"none",paymentMethod:"Debit Card",paymentHow:"In Person",receiptId:r.id});
+          r.expenseId=expId;
+          saveData();render();
         } else alert("Enter an amount first.");
-      }},"Log as Expense")
-    ));
+      }},"+ Create New Expense"));
+      
+      // Attach to existing
+      expBtnRow.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"5px 12px"},onClick:()=>{
+        state.showAttachExpenseList=!state.showAttachExpenseList;
+        render();
+      }},"Attach to Existing"));
+      
+      expenseBox.appendChild(expBtnRow);
+      
+      // Show expense list for attaching
+      if(state.showAttachExpenseList){
+        const expenses=state.data.entries.filter(e=>e.type==="expense"&&!e.receiptId)
+          .sort((a,b)=>b.date.localeCompare(a.date)).slice(0,20);
+        
+        if(expenses.length===0){
+          expenseBox.appendChild(h("div",{style:{fontSize:"11px",color:"var(--dim)",marginTop:"8px"}},"No unlinked expenses found."));
+        } else {
+          const list=h("div",{style:{maxHeight:"180px",overflowY:"auto",marginTop:"8px",borderTop:"1px solid var(--border)",paddingTop:"6px"}});
+          expenses.forEach(exp=>{
+            const expRow=h("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 4px",borderBottom:"1px solid var(--border)22",cursor:"pointer",borderRadius:"4px"},
+              onClick:()=>{
+                exp.receiptId=r.id;
+                r.expenseId=exp.id;
+                state.showAttachExpenseList=false;
+                saveData();render();
+              }
+            });
+            expRow.addEventListener("mouseenter",()=>{expRow.style.background="var(--bg)";});
+            expRow.addEventListener("mouseleave",()=>{expRow.style.background="transparent";});
+            expRow.appendChild(h("div",{},
+              h("div",{style:{fontSize:"12px",fontWeight:600,color:"var(--cream)"}},exp.description||exp.category||"Expense"),
+              h("div",{style:{fontSize:"10px",color:"var(--dim)"}},exp.date+" • "+(getBiz(exp.business)||{}).name)
+            ));
+            expRow.appendChild(h("span",{className:"mn",style:{fontSize:"12px",fontWeight:700,color:"var(--pr)"}},fmt(exp.amount)));
+            list.appendChild(expRow);
+          });
+          expenseBox.appendChild(list);
+        }
+      }
+    }
+    modal.appendChild(expenseBox);
+    
+    // Image actions
+    const imgActions=h("div",{style:{display:"flex",gap:"6px",marginTop:"10px",flexWrap:"wrap"}});
+    imgActions.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"5px 12px"},onClick:()=>{
+      const inp=document.createElement("input");inp.type="file";inp.accept="image/*,.pdf,.heic,.heif";
+      inp.addEventListener("change",async(e)=>{
+        const file=e.target.files[0];if(!file)return;
+        const reader=new FileReader();
+        reader.onload=async()=>{
+          if(file.type.startsWith("image")||/\.(heic|heif)$/i.test(file.name)){
+            const normalized=await normalizeImage(reader.result,file.name);
+            r.data=normalized.data;
+            r.type=normalized.type;
+            r.name=normalized.name;
+          } else {
+            r.data=reader.result;
+            r.type=file.type;
+            r.name=file.name;
+          }
+          r.size=file.size;
+          saveData();render();
+        };
+        reader.readAsDataURL(file);
+      });inp.click();
+    }},"📷 Re-upload Image"));
+    if(r.data&&r.type&&r.type.startsWith("image")){
+      imgActions.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"5px 12px"},onClick:async()=>{
+        await scanReceipt(r);saveData();render();
+      }},r.scanning?"Scanning...":"🔍 Re-scan"));
+    }
+    if(r.data){
+      imgActions.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"5px 12px"},onClick:()=>{
+        const a=document.createElement("a");a.href=r.data;a.download=receiptFileName(r);a.click();
+      }},"📥 Download"));
+    }
+    modal.appendChild(imgActions);
     
     // Buttons
     const btns=h("div",{style:{display:"flex",gap:"8px",marginTop:"14px"}});
@@ -3778,9 +4274,48 @@ function renderModal(){
     return overlay;
   }
   
+  if(state.modal==="tax_shelters"){
+    const ts=state.data.taxShelters;
+    const overlay=makeOverlay(()=>{state.modal=null;render();});
+    const modal=h("div",{className:"modal",style:{maxWidth:"450px"}});
+    modal.appendChild(h("h3",{style:{fontFamily:"var(--heading)",fontSize:"19px",fontWeight:700,color:"var(--gold)",marginBottom:"6px"}},"Tax Shelter Contributions"));
+    modal.appendChild(h("p",{style:{fontSize:"11px",color:"var(--dim)",marginBottom:"16px"}},"Enter your contribution room (from CRA My Account) and how much you've contributed this year."));
+    
+    const fields=[
+      {label:"RRSP Room (from Notice of Assessment)",key:"rrspRoom",ph:"e.g. 15000"},
+      {label:"RRSP Contributed This Year",key:"rrspUsed",ph:"0"},
+      {label:"TFSA Room (2026: $7,000 + unused from prior years)",key:"tfsaRoom",ph:"7000"},
+      {label:"TFSA Contributed This Year",key:"tfsaUsed",ph:"0"},
+      {label:"FHSA Room (max $8,000/yr)",key:"fhsaRoom",ph:"8000"},
+      {label:"FHSA Contributed This Year",key:"fhsaUsed",ph:"0"},
+    ];
+    fields.forEach(f=>{
+      modal.appendChild(h("div",{className:"mb-10"},h("label",{className:"label"},f.label)));
+      const inp=document.createElement("input");inp.className="inp";inp.type="number";inp.step="0.01";
+      inp.value=String(ts[f.key]||"");inp.placeholder=f.ph;
+      inp.addEventListener("input",e=>{ts[f.key]=Number(e.target.value)||0;});
+      modal.appendChild(inp);
+    });
+    
+    // FHSA eligibility toggle
+    const fhsaRow=h("div",{style:{display:"flex",alignItems:"center",gap:"8px",marginBottom:"14px",marginTop:"6px"}});
+    const fhsaCheck=h("div",{style:{width:"20px",height:"20px",borderRadius:"5px",border:"2px solid "+(ts.fhsaEligible?"var(--pg)":"var(--border)"),background:ts.fhsaEligible?"var(--pg)":"transparent",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"},onClick:()=>{ts.fhsaEligible=!ts.fhsaEligible;render();}});
+    if(ts.fhsaEligible)fhsaCheck.appendChild(h("span",{style:{color:"#fff",fontSize:"12px",fontWeight:800}},"✓"));
+    fhsaRow.appendChild(fhsaCheck);
+    fhsaRow.appendChild(h("span",{style:{fontSize:"12px",color:"var(--cream)"}},"I'm eligible for FHSA (first-time home buyer, haven't owned)"));
+    modal.appendChild(fhsaRow);
+    
+    const btns=h("div",{style:{display:"flex",gap:"8px"}});
+    btns.appendChild(h("button",{className:"btn btn-ghost",style:{flex:1},onClick:()=>{state.modal=null;render();}},"Cancel"));
+    btns.appendChild(h("button",{className:"btn btn-gold",style:{flex:1},onClick:()=>{saveData();state.modal=null;render();}},"Save"));
+    modal.appendChild(btns);
+    overlay.appendChild(modal);
+    return overlay;
+  }
+  
   // Shortcuts modal — standalone, doesn't use the generic modal/overlay
   if(state.modal==="shortcuts"){
-    const sOverlay=h("div",{className:"overlay",onClick:e=>{if(e.target===e.currentTarget){state.modal=null;render();}}});
+    const sOverlay=makeOverlay(()=>{state.modal=null;render();});
     const sModal=h("div",{className:"modal",style:{maxWidth:"420px"}});
     sModal.appendChild(h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"18px"}},
       h("h3",{style:{fontFamily:"var(--heading)",fontSize:"18px",fontWeight:700,color:"var(--gold)"}},"Keyboard Shortcuts"),
@@ -3801,7 +4336,7 @@ function renderModal(){
     return sOverlay;
   }
   
-  const overlay=h("div",{className:"overlay",onClick:e=>{if(e.target===e.currentTarget){state.modal=null;state.editId=null;render();}}});
+  const overlay=makeOverlay(()=>{state.modal=null;state.editId=null;render();});
   const modal=h("div",{className:"modal"});
   
   if(state.modal==="income"){
@@ -3946,10 +4481,15 @@ function renderModal(){
       const lonKey=field==="from"?"fLon":"tLon";
       const wrapper=h("div",{style:{marginBottom:"10px",position:"relative"}});
       wrapper.appendChild(h("label",{className:"label"},"" +(field==="from"?"From":"To")));
-      wrapper.appendChild(inputEl("text",state.milF[field],v=>{
-        state.milF[field]=v;state.milF[latKey]=null;state.milF[lonKey]=null;
-        searchAddr(v,field);
-      },"Type 3+ letters to search..."));
+      const addrInp=document.createElement("input");
+      addrInp.className="inp";addrInp.type="text";addrInp.value=state.milF[field]||"";
+      addrInp.placeholder="Type 3+ letters to search...";
+      addrInp.setAttribute("data-addr-field",field);
+      addrInp.addEventListener("input",e=>{
+        state.milF[field]=e.target.value;state.milF[latKey]=null;state.milF[lonKey]=null;
+        searchAddr(e.target.value,field);
+      });
+      wrapper.appendChild(addrInp);
       if(state.addrLoading[field])wrapper.appendChild(h("div",{style:{fontSize:"10px",color:"var(--pb)",marginTop:"4px"}},"Searching..."));
       if(state.milF[latKey])wrapper.appendChild(h("div",{style:{fontSize:"10px",color:"var(--pg)",marginTop:"3px"}},"✓ Location set"));
       if(state.addrResults[field].length>0){
@@ -4256,7 +4796,14 @@ if(!state.receiptSearch)state.receiptSearch="";
 function receiptFileName(r){
   const vendor=(r.vendor||"receipt").replace(/[<>:"/\\|?*]/g,"_").replace(/\s+/g,"-").substring(0,30);
   const amt=r.amount?("_$"+Number(r.amount).toFixed(2)):"";
-  const ext=r.name?(r.name.includes(".")?"."+r.name.split(".").pop():".jpg"):".jpg";
+  let ext=".jpg";
+  if(r.name&&r.name.includes(".")){
+    const origExt=r.name.split(".").pop().toLowerCase();
+    // Force image extensions to .jpg since we normalize to JPEG
+    if(["heic","heif","webp","tiff","bmp","avif","png"].includes(origExt))ext=".jpg";
+    else if(origExt==="pdf")ext=".pdf";
+    else ext="."+origExt;
+  }
   return (r.date||today())+"_"+vendor+amt+ext;
 }
 
@@ -4319,171 +4866,51 @@ async function compressImage(dataUrl,maxWidth){
   });
 }
 
-// Create a tiny thumbnail for storage-friendly receipt preview
-async function createThumbnail(dataUrl,maxSize){
+// Convert any image (HEIC, PNG, WebP, etc) to JPEG under 5MB
+// Returns {data, type, name} with normalized values
+async function normalizeImage(dataUrl,originalName){
   return new Promise((resolve)=>{
     const img=new Image();
     img.onload=()=>{
+      let w=img.naturalWidth||img.width;
+      let ht=img.naturalHeight||img.height;
+      let quality=0.85;
+      
+      // If image is huge, scale down to max 3000px wide
+      const maxW=3000;
+      if(w>maxW){ht=Math.round(ht*(maxW/w));w=maxW;}
+      
       const canvas=document.createElement("canvas");
-      let w=img.width,ht=img.height;
-      const scale=Math.min(maxSize/w,maxSize/ht);
-      if(scale<1){w=Math.round(w*scale);ht=Math.round(ht*scale);}
       canvas.width=w;canvas.height=ht;
       const ctx=canvas.getContext("2d");
       ctx.drawImage(img,0,0,w,ht);
-      resolve(canvas.toDataURL("image/jpeg",0.5));
+      
+      // Try to get under 5MB, reduce quality if needed
+      let result=canvas.toDataURL("image/jpeg",quality);
+      while(result.length>5*1024*1024&&quality>0.3){
+        quality-=0.1;
+        result=canvas.toDataURL("image/jpeg",quality);
+      }
+      // If still too big, scale down more
+      if(result.length>5*1024*1024){
+        w=Math.round(w*0.6);ht=Math.round(ht*0.6);
+        canvas.width=w;canvas.height=ht;
+        ctx.drawImage(img,0,0,w,ht);
+        result=canvas.toDataURL("image/jpeg",0.7);
+      }
+      
+      // Fix filename extension
+      const newName=originalName?originalName.replace(/\.(heic|heif|webp|tiff|bmp|avif|png)$/i,".jpg"):("receipt-"+today()+".jpg");
+      
+      resolve({data:result,type:"image/jpeg",name:newName});
     };
-    img.onerror=()=>resolve(null);
+    img.onerror=()=>{
+      // Can't decode image — return original
+      resolve({data:dataUrl,type:"image/jpeg",name:originalName||"receipt.jpg"});
+    };
     img.src=dataUrl;
   });
 }
-
-// Compress receipt image to storage-friendly preview (400px wide, JPEG 70%)
-// Used when Google Drive isn't connected — keeps visual quality while saving space
-async function compressReceiptForStorage(receipt){
-  if(!receipt.data||receipt.compressed)return false;
-  if(receipt.type&&receipt.type.startsWith("image")){
-    const preview=await compressImage(receipt.data,400);
-    if(preview&&preview.length<receipt.data.length){
-      receipt.fullData=receipt.data; // keep original temporarily
-      receipt.data=preview;
-      receipt.compressed=true;
-      return true;
-    }
-  }
-  return false;
-}
-
-// ═══════════════════════════════════════════════════
-// GOOGLE DRIVE INTEGRATION — Receipt Storage
-// ═══════════════════════════════════════════════════
-
-let gDriveToken=null;
-const GDRIVE_CLIENT_ID_KEY="cra-gdrive-client-id";
-const GDRIVE_FOLDER_NAME="CRA-Receipts";
-
-async function loadGDriveClientId(){
-  try{const r=await window.storage.get(storageKey("gdrive-client-id"));return r?r.value:null;}catch(e){return null;}
-}
-async function saveGDriveClientId(id){
-  try{await window.storage.set(storageKey("gdrive-client-id"),id);}catch(e){}
-}
-
-// OAuth2 implicit flow — opens Google sign-in popup
-async function gDriveAuth(){
-  const clientId=await loadGDriveClientId();
-  if(!clientId){alert("Set your Google Client ID in Settings first.");return false;}
-  
-  return new Promise((resolve)=>{
-    const redirectUri=window.location.origin+window.location.pathname;
-    const scope="https://www.googleapis.com/auth/drive.file";
-    const url="https://accounts.google.com/o/oauth2/v2/auth?client_id="+encodeURIComponent(clientId)
-      +"&redirect_uri="+encodeURIComponent(redirectUri)
-      +"&response_type=token&scope="+encodeURIComponent(scope)
-      +"&prompt=consent";
-    
-    const popup=window.open(url,"gauth","width=500,height=600");
-    const timer=setInterval(()=>{
-      try{
-        if(!popup||popup.closed){clearInterval(timer);resolve(false);return;}
-        const pUrl=popup.location.href;
-        if(pUrl.includes("access_token")){
-          const hash=pUrl.split("#")[1];
-          const params=new URLSearchParams(hash);
-          gDriveToken=params.get("access_token");
-          popup.close();clearInterval(timer);
-          resolve(!!gDriveToken);
-        }
-      }catch(e){/* cross-origin, keep waiting */}
-    },500);
-    // Timeout after 2 minutes
-    setTimeout(()=>{clearInterval(timer);if(popup&&!popup.closed)popup.close();resolve(false);},120000);
-  });
-}
-
-// Find or create a folder in Google Drive
-async function gDriveFindOrCreateFolder(name,parentId){
-  if(!gDriveToken)return null;
-  // Search for existing folder
-  let q="name='"+name.replace(/'/g,"\\'")+"' and mimeType='application/vnd.google-apps.folder' and trashed=false";
-  if(parentId)q+=" and '"+parentId+"' in parents";
-  
-  const searchResp=await fetch("https://www.googleapis.com/drive/v3/files?q="+encodeURIComponent(q)+"&fields=files(id,name)",{
-    headers:{Authorization:"Bearer "+gDriveToken}
-  });
-  const searchData=await searchResp.json();
-  if(searchData.files&&searchData.files.length>0)return searchData.files[0].id;
-  
-  // Create folder
-  const meta={name,mimeType:"application/vnd.google-apps.folder"};
-  if(parentId)meta.parents=[parentId];
-  const createResp=await fetch("https://www.googleapis.com/drive/v3/files",{
-    method:"POST",
-    headers:{Authorization:"Bearer "+gDriveToken,"Content-Type":"application/json"},
-    body:JSON.stringify(meta)
-  });
-  const created=await createResp.json();
-  return created.id||null;
-}
-
-// Upload a receipt to Google Drive with organized folder structure
-async function uploadReceiptToGDrive(receipt){
-  if(!gDriveToken||!receipt.data)return null;
-  try{
-    const biz=state.data.businesses.find(b=>b.id===receipt.business);
-    const bizName=(biz?biz.name:"Personal").replace(/[\/\\:*?"<>|]/g,"-");
-    const d=new Date(receipt.date||today());
-    const monthNames=["January","February","March","April","May","June","July","August","September","October","November","December"];
-    const yearStr=String(d.getFullYear());
-    const monthStr=String(d.getMonth()+1).padStart(2,"0")+"-"+monthNames[d.getMonth()];
-    const catName=(receipt.folder||"Uncategorized").replace(/[\/\\:*?"<>|]/g,"-");
-    
-    // Create folder chain: CRA-Receipts / Business / Year / Month / Category
-    const rootId=await gDriveFindOrCreateFolder(GDRIVE_FOLDER_NAME,null);
-    const bizId=await gDriveFindOrCreateFolder(bizName,rootId);
-    const yearId=await gDriveFindOrCreateFolder(yearStr,bizId);
-    const monthId=await gDriveFindOrCreateFolder(monthStr,yearId);
-    const catId=await gDriveFindOrCreateFolder(catName,monthId);
-    
-    if(!catId){console.error("Failed to create Drive folder chain");return null;}
-    
-    // Convert data URI to blob
-    const parts=receipt.data.split(",");
-    const mime=parts[0].match(/:(.*?);/)?.[1]||"image/jpeg";
-    const binary=atob(parts[1]);
-    const arr=new Uint8Array(binary.length);
-    for(let i=0;i<binary.length;i++)arr[i]=binary.charCodeAt(i);
-    const blob=new Blob([arr],{type:mime});
-    
-    // Upload file using multipart upload
-    const fileName=receiptFileName(receipt);
-    const metadata={name:fileName,parents:[catId]};
-    
-    const form=new FormData();
-    form.append("metadata",new Blob([JSON.stringify(metadata)],{type:"application/json"}));
-    form.append("file",blob);
-    
-    const uploadResp=await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink",{
-      method:"POST",
-      headers:{Authorization:"Bearer "+gDriveToken},
-      body:form
-    });
-    const uploaded=await uploadResp.json();
-    
-    if(uploaded.id){
-      receipt.gDriveId=uploaded.id;
-      receipt.gDriveLink=uploaded.webViewLink||null;
-      return uploaded.id;
-    }
-    return null;
-  }catch(e){
-    console.error("Google Drive upload failed:",e);
-    return null;
-  }
-}
-
-// Check if Google Drive is connected
-function isGDriveConnected(){return !!gDriveToken;}
 
 // Auto-detect folder from filename or vendor name — matches CRA expense categories
 // Right-click context menu like an OS
@@ -4865,32 +5292,29 @@ function renderReceipts(){
           const detectedFolder=autoDetectFolder(file.name);
           let parsedAmt="";const amtMatch=file.name.match(/[_$]+(\d+)[_\.](\d{2})/);if(amtMatch)parsedAmt=amtMatch[1]+"."+amtMatch[2];
           let parsedVendor="";const vnMatch=file.name.replace(/^\d{4}-\d{2}-\d{2}_/,"").split(/[_$]/)[0];if(vnMatch&&vnMatch.length>1)parsedVendor=vnMatch.replace(/-/g," ").replace(/\.[^.]+$/,"");
-          const receipt={id:uid(),name:file.name,date:today(),folder:detectedFolder,
+          
+          // Normalize all images to JPEG under 5MB (converts HEIC, PNG, WebP, etc)
+          let imgData=reader.result;
+          let imgType=file.type;
+          let imgName=file.name;
+          if(file.type.startsWith("image")||/\.(heic|heif)$/i.test(file.name)){
+            const normalized=await normalizeImage(reader.result,file.name);
+            imgData=normalized.data;
+            imgType=normalized.type;
+            imgName=normalized.name;
+          }
+          
+          const receipt={id:uid(),name:imgName,date:today(),folder:detectedFolder,
             category:detectedFolder!=="Uncategorized"?detectedFolder:"",
             business:nav&&nav.biz?nav.biz:(state.activeBiz!=="all"?state.activeBiz:"b1"),
-            amount:parsedAmt,vendor:parsedVendor,notes:"",data:reader.result,type:file.type,size:file.size};
+            amount:parsedAmt,vendor:parsedVendor,notes:"",data:imgData,type:imgType,size:file.size};
           state.data.receipts.push(receipt);
           saveData();render();
           if(file.type.startsWith("image")){
             scanReceipt(receipt).then(async()=>{
-              // Auto-upload to Google Drive if connected
-              if(isGDriveConnected()&&receipt.data){
-                const driveId=await uploadReceiptToGDrive(receipt);
-                if(driveId){
-                  await compressReceiptForStorage(receipt);
-                  saveData();
-                }
-              }
               state.modal="receipt_edit";state.editReceiptId=receipt.id;render();
             });
-          } else {
-            // PDF — upload to Drive if connected
-            if(isGDriveConnected()&&receipt.data){
-              const driveId=await uploadReceiptToGDrive(receipt);
-              if(driveId){receipt.data=null;receipt.compressed=true;saveData();}
-            }
-            state.modal="receipt_edit";state.editReceiptId=receipt.id;render();
-          }
+          } else {state.modal="receipt_edit";state.editReceiptId=receipt.id;render();}
         };reader.readAsDataURL(file);
       }
     });inp.click();
@@ -4900,56 +5324,6 @@ function renderReceipts(){
     taskbar.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"6px 12px",color:"var(--muted)"},onClick:async()=>{
       await exportReceiptsAsZip(null,"CRA-Receipts");
     }},"📥 Download ZIP"));
-  }
-  // Google Drive connect / Upload
-  const fullSizeCount=receipts.filter(r=>r.data&&!r.compressed).length;
-  if(isGDriveConnected()){
-    taskbar.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"6px 12px",color:"var(--pg)"}},"☁️ Drive ✓"));
-    if(fullSizeCount>0){
-      taskbar.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"6px 12px",color:"var(--pb)"},onClick:async()=>{
-        if(!confirm("Upload "+fullSizeCount+" full-size receipt(s) to Google Drive, then compress images in app to save storage?\n\nFolder: CRA-Receipts / Business / Year / Month / Category"))return;
-        let uploaded=0;let failed=0;
-        for(const r of receipts){
-          if(r.data&&!r.compressed){
-            const id=await uploadReceiptToGDrive(r);
-            if(id){
-              uploaded++;
-              // Compress for local storage now that full image is in Drive
-              await compressReceiptForStorage(r);
-            } else {failed++;}
-          }
-        }
-        saveData();render();
-        alert("✓ "+uploaded+" uploaded to Google Drive"+(failed>0?", "+failed+" failed":"")+".\nLocal storage freed up!");
-      }},"☁️ Upload "+fullSizeCount+" to Drive"));
-    }
-  } else {
-    taskbar.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"6px 12px",color:"var(--pb)"},onClick:async()=>{
-      const clientId=await loadGDriveClientId();
-      if(!clientId){
-        const id=prompt("To connect Google Drive, you need a Google Cloud Client ID.\n\n1. Go to console.cloud.google.com\n2. Create a project → Enable Google Drive API\n3. Create OAuth 2.0 Client ID (Web app)\n4. Add this as redirect URI:\n"+window.location.origin+window.location.pathname+"\n\nPaste your Client ID here:");
-        if(!id)return;
-        await saveGDriveClientId(id.trim());
-      }
-      const ok=await gDriveAuth();
-      if(ok){render();alert("✓ Google Drive connected! Your receipts will upload to a CRA-Receipts folder.");}
-      else alert("Google Drive connection failed. Check your Client ID in Settings.");
-    }},"☁️ Connect Google Drive"));
-    // Fallback compress without Drive
-    if(fullSizeCount>0){
-      taskbar.appendChild(h("button",{className:"btn btn-ghost",style:{fontSize:"11px",padding:"6px 12px",color:"var(--po)"},onClick:async()=>{
-        if(!confirm("Compress "+fullSizeCount+" receipt(s) to 400px previews?\n\nThis saves storage but reduces image quality.\nFor full backups, use Download ZIP first."))return;
-        let compressed=0;
-        for(const r of receipts){
-          if(r.data&&!r.compressed){
-            const ok=await compressReceiptForStorage(r);
-            if(ok)compressed++;
-          }
-        }
-        saveData();render();
-        alert("✓ Compressed "+compressed+" receipt(s)!");
-      }},"🗜 Compress "+fullSizeCount));
-    }
   }
   // Auto-sort
   const uncatCount=receipts.filter(r=>r.folder==="Uncategorized").length;
@@ -5093,7 +5467,7 @@ function renderReceipts(){
         if(r.data&&r.type&&r.type.startsWith("image")){
           row.appendChild(h("img",{src:r.data,style:{width:"36px",height:"36px",objectFit:"cover",borderRadius:"6px",border:"1px solid var(--border)"}}));
         } else {
-          row.appendChild(h("div",{style:{width:"36px",height:"36px",borderRadius:"6px",background:"var(--bg3)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px"}},r.gDriveId?"☁️":"\uD83D\uDCC4"));
+          row.appendChild(h("div",{style:{width:"36px",height:"36px",borderRadius:"6px",background:"var(--bg3)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px"}},"\uD83D\uDCC4"));
         }
         row.appendChild(h("div",{},
           h("div",{style:{fontSize:"12px",fontWeight:600,color:"var(--cream)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},r.vendor||r.name||"Untitled"),
@@ -5104,21 +5478,20 @@ function renderReceipts(){
         row.appendChild(h("span",{style:{fontSize:"10px",color:"var(--dim)"}},r.date||"\u2014"));
         const acts=h("div",{style:{display:"flex",gap:"4px"}});
         acts.appendChild(h("button",{style:{background:"none",border:"none",color:"var(--dim)",cursor:"pointer",fontSize:"12px",padding:"2px"},onClick:(e)=>{e.stopPropagation();state.modal="receipt_edit";state.editReceiptId=r.id;render();}},"\u270E"));
-        acts.appendChild(h("button",{style:{background:"none",border:"none",color:"var(--pr)",cursor:"pointer",fontSize:"12px",padding:"2px"},onClick:(e)=>{e.stopPropagation();if(confirm("Delete this receipt?")){state.data.receipts=state.data.receipts.filter(x=>x.id!==r.id);saveData();render();}}},"\u2715"));
+        acts.appendChild(h("button",{style:{background:"none",border:"none",color:"var(--pr)",cursor:"pointer",fontSize:"12px",padding:"2px"},onClick:(e)=>{e.stopPropagation();if(confirm("Delete this receipt?")){deleteReceiptImage(r.id);state.data.receipts=state.data.receipts.filter(x=>x.id!==r.id);saveData();render();}}},"\u2715"));
         row.appendChild(acts);
         row.addEventListener("dblclick",()=>{state.modal="receipt_preview";state.editReceiptId=r.id;render();});
         row.addEventListener("contextmenu",(e)=>{
           showContextMenu(e,[
             {icon:"👁",label:"Preview",action:()=>{state.modal="receipt_preview";state.editReceiptId=r.id;render();}},
             {icon:"✎",label:"Edit",action:()=>{state.modal="receipt_edit";state.editReceiptId=r.id;render();}},
-            {icon:"📥",label:r.data?"Download":(r.gDriveLink?"Open in Drive":"No image"),action:()=>{
+            {icon:"📥",label:"Download",action:()=>{
               if(r.data){const a=document.createElement("a");a.href=r.data;a.download=receiptFileName(r);a.click();}
-              else if(r.gDriveLink){window.open(r.gDriveLink,"_blank");}
-              else alert("Image was compressed. Full version is in Google Drive if connected.");
+              else alert("Image not loaded. Try refreshing the page.");
             }},
             {divider:true},
             {icon:"🗑",label:"Delete",danger:true,action:()=>{
-              if(confirm("Delete this receipt?")){state.data.receipts=state.data.receipts.filter(x=>x.id!==r.id);saveData();render();}
+              if(confirm("Delete this receipt?")){deleteReceiptImage(r.id);state.data.receipts=state.data.receipts.filter(x=>x.id!==r.id);saveData();render();}
             }},
           ]);
         });
@@ -5160,9 +5533,10 @@ function render(){
   
   const app=document.getElementById("app");
   
-  // Smooth transition — only fade main content area, not sidebar
+  // Smooth transition — skip fade when modal is open or user is typing (prevents flicker)
   const existingMain=app.querySelector(".main");
-  if(existingMain&&!render._skipFade){
+  const skipFade=render._skipFade||state.modal||(activeTag==="INPUT"||activeTag==="TEXTAREA");
+  if(existingMain&&!skipFade){
     existingMain.style.opacity="0";
     existingMain.style.transition="opacity 0.12s ease";
   }
@@ -5321,6 +5695,27 @@ function render(){
     }
   });
   
+  // Tax Year selector
+  const yearSection=h("div",{style:{padding:"0 6px",marginTop:"18px"}});
+  yearSection.appendChild(h("div",{style:{fontSize:"10px",color:"var(--dark)",fontWeight:700,textTransform:"uppercase",letterSpacing:"1.2px",marginBottom:"8px"}},"Tax Year"));
+  const yearBtns=h("div",{style:{display:"flex",gap:"4px",flexWrap:"wrap"}});
+  // Get all years from data
+  const allYears=new Set();
+  state.data.entries.forEach(e=>{if(e.date)allYears.add(e.date.substring(0,4));});
+  state.data.mileage.forEach(m=>{if(m.date)allYears.add(m.date.substring(0,4));});
+  allYears.add(String(new Date().getFullYear()));
+  const yearList=[...allYears].sort().reverse();
+  
+  yearList.forEach(yr=>{
+    const active=state.taxYear===yr;
+    yearBtns.appendChild(h("button",{style:{padding:"5px 12px",borderRadius:"6px",border:active?"1px solid var(--gold)":"1px solid var(--border)",background:active?"var(--gold)":"transparent",color:active?"#fff":"var(--dim)",fontSize:"12px",fontWeight:active?700:500,cursor:"pointer",fontFamily:"'Outfit',sans-serif"},onClick:()=>{state.taxYear=yr;render();}},yr));
+  });
+  // All time button
+  const allActive=state.taxYear==="all";
+  yearBtns.appendChild(h("button",{style:{padding:"5px 10px",borderRadius:"6px",border:allActive?"1px solid var(--gold)":"1px solid var(--border)",background:allActive?"var(--gold)":"transparent",color:allActive?"#fff":"var(--dim)",fontSize:"11px",fontWeight:allActive?700:500,cursor:"pointer",fontFamily:"'Outfit',sans-serif"},onClick:()=>{state.taxYear="all";render();}},"All"));
+  yearSection.appendChild(yearBtns);
+  sidebar.appendChild(yearSection);
+  
   // Business list
   const bizSection=h("div",{className:"sidebar-extra",style:{marginTop:"18px",padding:"0 6px"}});
   bizSection.appendChild(h("div",{style:{fontSize:"10px",color:"var(--dark)",fontWeight:700,textTransform:"uppercase",letterSpacing:"1.2px",marginBottom:"8px"}},"Businesses"));
@@ -5361,7 +5756,7 @@ function render(){
   const header=h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px",flexWrap:"wrap",gap:"10px"}});
   header.appendChild(h("div",{},
     h("h1",{style:{fontSize:"24px",fontWeight:700}},state.activeBiz==="all"?"All Businesses":gBI(state.activeBiz)+" "+gBN(state.activeBiz)),
-    h("p",{style:{fontSize:"12px",color:"var(--dark)",marginTop:"2px"}},state.data.entries.length+" entries • "+state.data.mileage.length+" drives • "+(state.data.projects||[]).length+" projects")
+    h("p",{style:{fontSize:"12px",color:"var(--dark)",marginTop:"2px"}},(state.taxYear!=="all"?"Tax Year "+state.taxYear+" • ":"All Time • ")+state.data.entries.filter(e=>state.taxYear==="all"||e.date&&e.date.startsWith(state.taxYear)).length+" entries • "+state.data.mileage.filter(m=>state.taxYear==="all"||m.date&&m.date.startsWith(state.taxYear)).length+" drives")
   ));
   // Compact action buttons
   const headerBtns=h("div",{style:{display:"flex",gap:"5px",flexWrap:"wrap"}});
@@ -5707,12 +6102,17 @@ function render(){
     
     // Restore focus to the input the user was typing in
     if(activeTag==="INPUT"||activeTag==="TEXTAREA"){
-      // Try to find the same input by placeholder or data attribute
       let target=null;
-      if(activeDataAttr)target=document.querySelector("[data-search-bar]");
+      // Check for address field first (most specific)
+      const addrField=activeEl?activeEl.getAttribute("data-addr-field"):null;
+      if(addrField)target=document.querySelector("[data-addr-field='"+addrField+"']");
+      // Then search bar
+      if(!target&&activeDataAttr)target=document.querySelector("[data-search-bar]");
+      // Then by placeholder
       if(!target&&activePlaceholder){
         const inputs=document.querySelectorAll("input,textarea");
-        for(const inp of inputs){if(inp.placeholder===activePlaceholder){target=inp;break;}}
+        for(const inp of inputs){if(inp.placeholder===activePlaceholder&&inp.value===activeVal){target=inp;break;}}
+        if(!target){for(const inp of inputs){if(inp.placeholder===activePlaceholder){target=inp;break;}}}
       }
       if(target){
         target.focus();
@@ -5723,7 +6123,7 @@ function render(){
   }; // end doBuild
   
   // If there's existing content, let fade-out happen first
-  if(existingMain&&!render._skipFade){
+  if(existingMain&&!skipFade){
     setTimeout(doBuild,80);
   } else {
     render._skipFade=false;
@@ -5922,7 +6322,7 @@ function safeDelete(type,id){
   else if(type==="project"){item=state.data.projects.find(p=>p.id===id);state.data.projects=state.data.projects.filter(p=>p.id!==id);}
   else if(type==="asset"){item=state.data.assets.find(a=>a.id===id);state.data.assets=state.data.assets.filter(a=>a.id!==id);}
   else if(type==="vault"){item=state.data.vault.find(v=>v.id===id);state.data.vault=state.data.vault.filter(v=>v.id!==id);}
-  else if(type==="receipt"){item=state.data.receipts.find(r=>r.id===id);state.data.receipts=state.data.receipts.filter(r=>r.id!==id);}
+  else if(type==="receipt"){item=state.data.receipts.find(r=>r.id===id);deleteReceiptImage(id);state.data.receipts=state.data.receipts.filter(r=>r.id!==id);}
   else if(type==="invoice"){item=state.data.invoices.find(i=>i.id===id);state.data.invoices=state.data.invoices.filter(i=>i.id!==id);}
   if(item){
     state.undoItem={type,item};
