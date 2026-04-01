@@ -5855,8 +5855,8 @@ function render(){
     }
   }
   
-  // ═══ QUICK ADD BAR (CEO Dashboard only) ═══
-  if(state.view==="ceo"){
+  // ═══ QUICK ADD BAR (Expenses page) ═══
+  if(state.view==="expenses"){
   if(!state.quickAddText)state.quickAddText="";  const quickBar=h("div",{style:{marginBottom:"16px"}});
   
   // Main input row
@@ -6065,7 +6065,7 @@ function render(){
     }
     main.appendChild(toastDiv);
   }
-  } // end CEO-only quick add + guided wizard
+  } // end expenses quick add + guided wizard
   const viewMap={
     ceo:renderCEO,income:renderIncome,expenses:renderExpenses,projects:renderProjects,
     jobcalc:renderJobCalc,afford:renderAfford,breakeven:renderBreakEven,invoice:renderInvoice,taxcal:renderTaxCal,ledger:renderLedger,recurring:renderRecurring,
@@ -6445,10 +6445,12 @@ function renderInvoice(){
   if(state.invoiceMode==="edit"){
     const f=state.invoiceF;
     const biz=getBiz(f.business);
+    if(!f.reimbursements)f.reimbursements=[];
     const subtotal=f.items.reduce((s,i)=>s+Number(i.qty||1)*Number(i.rate||0),0);
+    const reimbTotal=f.reimbursements.reduce((s,r)=>s+Number(r.amount||0),0);
     const hst=biz?.registered?subtotal*0.13:0;
     const showHst=biz?.registered;
-    const total=subtotal+hst;
+    const total=subtotal+hst+reimbTotal;
     
     // Back button
     els.push(h("div",{style:{marginBottom:"14px"}},h("button",{className:"btn btn-ghost",style:{fontSize:"12px"},onClick:()=>{state.invoiceMode=null;render();}},"← Back to Invoices")));
@@ -6482,8 +6484,11 @@ function renderInvoice(){
       h("div",{},h("label",{className:"label"},"Client Email"),inputEl("text",f.email,v=>{state.invoiceF.email=v;invDeb();},"e.g. client@email.com"))
     ));
     
-    // Row 3: Client Address
-    form.appendChild(h("div",{className:"mb-10"},h("label",{className:"label"},"Client Address"),inputEl("text",f.clientAddress||"",v=>{state.invoiceF.clientAddress=v;invDeb();},"e.g. 123 Main St, Brampton, ON L6T 1A1")));
+    // Row 3: Client Address + Tax Number
+    form.appendChild(h("div",{className:"grid-2 mb-10"},
+      h("div",{},h("label",{className:"label"},"Client Address"),inputEl("text",f.clientAddress||"",v=>{state.invoiceF.clientAddress=v;invDeb();},"e.g. 123 Main St, Brampton, ON L6T 1A1")),
+      h("div",{},h("label",{className:"label"},"Client Tax # / HST #"),inputEl("text",f.clientTaxNum||"",v=>{state.invoiceF.clientTaxNum=v;invDeb();},"e.g. 123456789 RT0001"))
+    ));
     
     // Row 4: PO# + Service Date Range
     form.appendChild(h("div",{className:"grid-3 mb-10"},
@@ -6510,6 +6515,56 @@ function renderInvoice(){
       form.appendChild(row);
     });
     form.appendChild(h("button",{style:{background:"none",border:"none",color:"var(--gold)",cursor:"pointer",fontSize:"12px",fontFamily:"'Outfit',sans-serif",marginBottom:"10px"},onClick:()=>{state.invoiceF.items.push({desc:"",qty:1,rate:""});render._skipFade=true;render();}},"+ Add Line"));
+    
+    // Reimbursements (not taxed)
+    form.appendChild(h("label",{className:"label",style:{marginBottom:"6px",display:"flex",justifyContent:"space-between",alignItems:"center"}},
+      h("span",{},"Reimbursements (not taxed)"),
+      h("button",{style:{background:"none",border:"none",color:"var(--pb)",cursor:"pointer",fontSize:"11px",fontFamily:"'Outfit',sans-serif"},onClick:()=>{
+        if(!state.invoiceF.reimbursements)state.invoiceF.reimbursements=[];
+        state.invoiceF.reimbursements.push({desc:"",amount:""});render._skipFade=true;render();
+      }},"+ Add Reimbursement")
+    ));
+    if(f.reimbursements&&f.reimbursements.length>0){
+      f.reimbursements.forEach((rb,i)=>{
+        const row=h("div",{style:{display:"flex",gap:"6px",marginBottom:"6px",alignItems:"center"}});
+        row.appendChild(inputEl("text",rb.desc,v=>{state.invoiceF.reimbursements[i].desc=v;invDeb();},"e.g. Travel, parking, materials",{flex:1}));
+        row.appendChild(inputEl("number",rb.amount,v=>{state.invoiceF.reimbursements[i].amount=v;clearTimeout(_invDeb);_invDeb=setTimeout(render,500);},"Amount $",{width:"100px"}));
+        // Attach receipt button
+        if(rb.receiptData){
+          row.appendChild(h("img",{src:rb.receiptData,style:{width:"28px",height:"28px",objectFit:"cover",borderRadius:"4px",border:"1px solid var(--border)",cursor:"pointer"},onClick:()=>{
+            // Preview the receipt
+            const w=window.open("","_blank","width=600,height=800");
+            w.document.write("<html><body style='margin:0;background:#111;display:flex;align-items:center;justify-content:center;min-height:100vh'><img src='"+rb.receiptData+"' style='max-width:100%;max-height:100vh'/></body></html>");
+          }}));
+          row.appendChild(h("button",{style:{background:"none",border:"none",color:"var(--pr)",cursor:"pointer",fontSize:"10px"},onClick:()=>{
+            state.invoiceF.reimbursements[i].receiptData=null;
+            render._skipFade=true;render();
+          }},"✕img"));
+        } else {
+          row.appendChild(h("button",{style:{padding:"4px 8px",borderRadius:"5px",border:"1px solid var(--border)",background:"var(--bg3)",color:"var(--dim)",fontSize:"10px",cursor:"pointer",whiteSpace:"nowrap"},onClick:()=>{
+            const inp=document.createElement("input");inp.type="file";inp.accept="image/*,.pdf,.heic,.heif";
+            inp.addEventListener("change",async(e)=>{
+              const file=e.target.files[0];if(!file)return;
+              const reader=new FileReader();
+              reader.onload=async()=>{
+                let imgData=reader.result;
+                // Normalize to JPEG
+                if(file.type.startsWith("image")||/\.(heic|heif)$/i.test(file.name)){
+                  const normalized=await normalizeImage(reader.result,file.name);
+                  imgData=normalized.data;
+                }
+                state.invoiceF.reimbursements[i].receiptData=imgData;
+                state.invoiceF.reimbursements[i].receiptName=file.name;
+                render._skipFade=true;render();
+              };
+              reader.readAsDataURL(file);
+            });inp.click();
+          }},"📎 Receipt"));
+        }
+        row.appendChild(h("button",{style:{background:"none",border:"none",color:"#4a3020",cursor:"pointer"},onClick:()=>{state.invoiceF.reimbursements.splice(i,1);render._skipFade=true;render();}},"✕"));
+        form.appendChild(row);
+      });
+    }
     
     // Discount + Deposit with debounced render
     const discInp=inputEl("number",f.discountPct||"",v=>{state.invoiceF.discountPct=v;invDeb();},"0");
@@ -6590,9 +6645,9 @@ function renderInvoice(){
       const discAmt=Number(f.discountPct||0)>0?subtotal*(Number(f.discountPct)/100):0;
       const afterDisc=subtotal-discAmt;
       const hstAmt=showHst?afterDisc*0.13:0;
-      const totalAmt=afterDisc+hstAmt;
+      const totalAmt=afterDisc+hstAmt+reimbTotal;
       const depositAmt=Number(f.depositPct||0)>0?totalAmt*(Number(f.depositPct)/100):0;
-      const inv={...f,id:f.id||uid(),status:f.status||"draft",subtotal,discount:discAmt,hst:hstAmt,total:totalAmt,deposit:depositAmt,depositPaid:f.depositPaid||false,createdDate:f.createdDate||today(),lastUpdated:today()};
+      const inv={...f,id:f.id||uid(),status:f.status||"draft",subtotal,reimbTotal,discount:discAmt,hst:hstAmt,total:totalAmt,deposit:depositAmt,depositPaid:f.depositPaid||false,createdDate:f.createdDate||today(),lastUpdated:today()};
       const idx=invoices.findIndex(x=>x.id===inv.id);
       if(idx>=0)invoices[idx]=inv;else invoices.push(inv);
       state.invoiceMode=null;state.invoiceF=null;saveData();render();
@@ -6608,7 +6663,7 @@ function renderInvoice(){
     const discAmt=Number(f.discountPct||0)>0?subtotal*(Number(f.discountPct)/100):0;
     const afterDisc=subtotal-discAmt;
     const hstAmt=showHst?afterDisc*0.13:0;
-    const totalAmt=afterDisc+hstAmt;
+    const totalAmt=afterDisc+hstAmt+reimbTotal;
     const depositAmt=Number(f.depositPct||0)>0?totalAmt*(Number(f.depositPct)/100):0;
     
     // DARK HEADER
@@ -6643,7 +6698,7 @@ function renderInvoice(){
     preview.appendChild(h("div",{style:{height:"3px",background:"linear-gradient(90deg,"+bc+","+bc+"44,transparent)"}}));
     
     // WHITE CONTENT AREA
-    const content=h("div",{style:{background:"#faf9f6",padding:"20px 28px",flex:1}});
+    const content=h("div",{style:{background:"#faf9f6",padding:"20px 28px",flex:1,display:"flex",flexDirection:"column"}});
     
     // Bill To card
     const billCard=h("div",{style:{display:"flex",gap:"12px",marginBottom:"16px"}});
@@ -6652,6 +6707,7 @@ function renderInvoice(){
       h("div",{style:{fontSize:"14px",fontWeight:700,color:"#1a1a1a"}},f.client||"Client Name"),
       f.clientAddress?h("div",{style:{fontSize:"10px",color:"#888",marginTop:"2px"}},f.clientAddress):null,
       f.email?h("div",{style:{fontSize:"10px",color:"#888",marginTop:"2px"}},f.email):null,
+      f.clientTaxNum?h("div",{style:{fontSize:"10px",color:"#555",marginTop:"3px"}},"Tax #: "+f.clientTaxNum):null,
       f.poNumber?h("div",{style:{fontSize:"10px",color:bc,marginTop:"3px",fontWeight:600}},"PO# "+f.poNumber):null
     ));
     if(f.serviceFrom||f.serviceTo){
@@ -6677,6 +6733,27 @@ function renderInvoice(){
       content.appendChild(itemCard);
     });
     
+    // ─── BOTTOM SECTION: Totals + Payment (always at bottom) ───
+    const bottomSection=h("div",{style:{marginTop:"auto"}});
+    
+    // Reimbursement lines (not taxed)
+    if(f.reimbursements&&f.reimbursements.length>0){
+      bottomSection.appendChild(h("div",{style:{fontSize:"8px",color:"#999",textTransform:"uppercase",letterSpacing:"1.5px",marginTop:"14px",marginBottom:"6px",fontWeight:700,paddingLeft:"4px"}},"REIMBURSEMENTS (NON-TAXABLE)"));
+      f.reimbursements.forEach(rb=>{
+        if(!rb.desc&&!rb.amount)return;
+        const rbCard=h("div",{style:{display:"flex",alignItems:"center",gap:"8px",padding:"8px 12px",borderRadius:"8px",background:"#f0f8ff",border:"1px solid #d0e8f0",marginBottom:"4px"}});
+        if(rb.receiptData){
+          rbCard.appendChild(h("img",{src:rb.receiptData,style:{width:"32px",height:"32px",objectFit:"cover",borderRadius:"4px",border:"1px solid #d0e8f0",flexShrink:0,cursor:"pointer"},onClick:()=>{
+            const w=window.open("","_blank","width=600,height=800");
+            w.document.write("<html><body style='margin:0;background:#111;display:flex;align-items:center;justify-content:center;min-height:100vh'><img src='"+rb.receiptData+"' style='max-width:100%;max-height:100vh'/></body></html>");
+          }}));
+        }
+        rbCard.appendChild(h("span",{style:{fontSize:"12px",color:"#555",flex:1}},rb.desc||"Reimbursement"));
+        rbCard.appendChild(h("span",{style:{fontFamily:"'JetBrains Mono',monospace",fontSize:"13px",fontWeight:600,color:"#1a1a1a"}},fmt(Number(rb.amount||0))));
+        bottomSection.appendChild(rbCard);
+      });
+    }
+    
     // TOTALS CARD
     const totBox=h("div",{style:{marginTop:"12px",padding:"14px 16px",borderRadius:"10px",background:"#fff",border:"1px solid #e8e0d0",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}});
     const totLine=(label,val,color,bold)=>h("div",{style:{display:"flex",justifyContent:"space-between",padding:"2px 0",fontSize:bold?"14px":"11px",fontWeight:bold?800:400}},
@@ -6686,11 +6763,24 @@ function renderInvoice(){
     totBox.appendChild(totLine("Subtotal",fmt(subtotal)));
     if(discAmt>0)totBox.appendChild(totLine("Discount ("+f.discountPct+"%)","−"+fmt(discAmt),"#6ab88a"));
     if(showHst)totBox.appendChild(totLine("HST (13%)",fmt(hstAmt)));
+    // Total before reimbursements
+    const totalBeforeReimb=subtotal-discAmt+hstAmt;
     totBox.appendChild(h("div",{style:{height:"1px",background:"#e8e0d0",margin:"5px 0"}}));
-    totBox.appendChild(totLine("Total Due",fmt(totalAmt),bc,true));
-    content.appendChild(totBox);
+    totBox.appendChild(totLine("Total (services + tax)",fmt(totalBeforeReimb),"#1a1a1a",false));
+    // Reimbursements
+    if(reimbTotal>0){
+      totBox.appendChild(h("div",{style:{height:"1px",background:"#e8e0d0",margin:"5px 0"}}));
+      f.reimbursements.forEach(rb=>{
+        if(rb.desc||rb.amount)totBox.appendChild(totLine("Reimb: "+(rb.desc||"Expense"),fmt(Number(rb.amount||0)),"#039be5"));
+      });
+      totBox.appendChild(totLine("Reimbursements total",fmt(reimbTotal),"#039be5"));
+    }
+    // Grand total
+    totBox.appendChild(h("div",{style:{height:"2px",background:bc,margin:"6px 0"}}));
+    totBox.appendChild(totLine("Grand Total",fmt(totalAmt),bc,true));
+    bottomSection.appendChild(totBox);
     
-    // Payment details wrapper — forces page break before this section in print
+    // Payment details wrapper
     const paymentSection=h("div",{className:"inv-pay-section",style:{marginTop:"8px"}});
     
     // Payment Schedule card (if splits exist)
@@ -6785,7 +6875,8 @@ function renderInvoice(){
       
       paymentSection.appendChild(payCard);
     }
-    content.appendChild(paymentSection);
+    bottomSection.appendChild(paymentSection);
+    content.appendChild(bottomSection);
     preview.appendChild(content);
     
     // DARK FOOTER
@@ -6847,6 +6938,34 @@ function renderInvoice(){
       // Get content div style for background
       var contentStyle=contentEl?contentEl.getAttribute("style")||"":"";
       
+      // Build receipt attachment pages HTML
+      var receiptPages="";
+      var receiptCount=0;
+      if(f.reimbursements&&f.reimbursements.length>0){
+        f.reimbursements.forEach(function(rb,idx){
+          if(rb.receiptData){
+            receiptCount++;
+            receiptPages+="<div class='page' style='background:#1a1816;display:flex;flex-direction:column'>";
+            receiptPages+=headerHTML+accentHTML;
+            receiptPages+="<div style='flex:1;background:#faf9f6;display:flex;flex-direction:column'>";
+            receiptPages+="<div style='padding:16px 28px;border-bottom:2px solid #e8e0d0;display:flex;justify-content:space-between;align-items:center'>";
+            receiptPages+="<div><div style='font-family:Playfair Display,Georgia,serif;font-size:14px;font-weight:800;color:#1a1a1a'>Receipt Attachment</div>";
+            receiptPages+="<div style='font-size:11px;color:#888;margin-top:2px'>Invoice "+(f.invNum||"")+" — "+(rb.desc||"Reimbursement "+(idx+1))+" — "+(f.client||"")+"</div></div>";
+            receiptPages+="<div style='text-align:right'><div class='mn' style='font-size:16px;font-weight:800;color:#1a1a1a'>"+fmt(Number(rb.amount||0))+"</div>";
+            receiptPages+="<div style='font-size:9px;color:#999;text-transform:uppercase'>Non-taxable reimbursement</div></div>";
+            receiptPages+="</div>";
+            receiptPages+="<div style='flex:1;display:flex;align-items:center;justify-content:center;padding:20px'>";
+            receiptPages+="<img src='"+rb.receiptData+"' style='max-width:100%;max-height:7.5in;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,.1)'/>";
+            receiptPages+="</div>";
+            receiptPages+="</div>";
+            receiptPages+="<div class='page-num'>RCPT_PAGE_"+receiptCount+"</div>";
+            receiptPages+="<div class='page-footer'>"+footerHTML+"</div>";
+            receiptPages+="</div>";
+          }
+        });
+      }
+      var totalPages=receiptCount>0?2+receiptCount:0; // will be recalculated below
+      
       if(hasPaySection&&page2Inner){
         // First render as single page to measure height
         d.write("<div id='measure' style='width:8.5in;position:absolute;visibility:hidden'>");
@@ -6865,29 +6984,39 @@ function renderInvoice(){
           measureEl.remove();
           
           if(totalHeight>pageLimit){
-            // Too tall — split into 2 pages
+            // Too tall — split into 2 pages + receipt attachments
+            var invPages=2+receiptCount;
             d.body.innerHTML="";
             var html="<div class='page'>";
             html+=headerHTML+accentHTML;
             html+="<div class='page-content' style='"+contentStyle+"'>"+page1Inner+"</div>";
-            html+="<div class='page-num'>Page 1 of 2</div>";
+            html+="<div class='page-num'>Page 1 of "+invPages+"</div>";
             html+="<div class='page-footer'>"+footerHTML+"</div>";
             html+="</div>";
             html+="<div class='page'>";
             html+=headerHTML+accentHTML;
             html+="<div class='page-content' style='"+contentStyle+"'>"+page2Inner+"</div>";
-            html+="<div class='page-num'>Page 2 of 2</div>";
+            html+="<div class='page-num'>Page 2 of "+invPages+"</div>";
             html+="<div class='page-footer'>"+footerHTML+"</div>";
             html+="</div>";
+            // Add receipt pages with correct numbers
+            var rp=receiptPages;
+            for(var r=1;r<=receiptCount;r++){rp=rp.replace("RCPT_PAGE_"+r,"Page "+(2+r)+" of "+invPages);}
+            html+=rp;
             d.body.innerHTML=html;
           } else {
-            // Fits on one page
+            // Fits on one page + receipt attachments
+            var invPages=1+receiptCount;
             d.body.innerHTML="";
             var html="<div class='page'>";
             for(var i=0;i<kids.length-1;i++){html+=kids[i].outerHTML;}
-            html+="<div class='page-num'>Page 1 of 1</div>";
+            html+="<div class='page-num'>Page 1 of "+invPages+"</div>";
             html+="<div class='page-footer'>"+footerHTML+"</div>";
             html+="</div>";
+            // Add receipt pages with correct numbers
+            var rp=receiptPages;
+            for(var r=1;r<=receiptCount;r++){rp=rp.replace("RCPT_PAGE_"+r,"Page "+(1+r)+" of "+invPages);}
+            html+=rp;
             d.body.innerHTML=html;
           }
           setTimeout(function(){w.focus();w.print();},300);
@@ -6895,12 +7024,17 @@ function renderInvoice(){
         if(d.fonts&&d.fonts.ready){d.fonts.ready.then(function(){setTimeout(buildPages,400);});}
         setTimeout(buildPages,2500);
       } else {
-        // No payment section — always single page
+        // No payment section — single page + receipt attachments
+        var invPages=1+receiptCount;
         d.write("<div class='page'>");
         for(var i=0;i<kids.length-1;i++){d.write(kids[i].outerHTML);}
-        d.write("<div class='page-num'>Page 1 of 1</div>");
+        d.write("<div class='page-num'>Page 1 of "+invPages+"</div>");
         d.write("<div class='page-footer'>"+footerHTML+"</div>");
         d.write("</div>");
+        // Add receipt pages with correct numbers
+        var rp=receiptPages;
+        for(var r=1;r<=receiptCount;r++){rp=rp.replace("RCPT_PAGE_"+r,"Page "+(1+r)+" of "+invPages);}
+        d.write(rp);
       
         d.write("</body></html>");d.close();
         var done=false;
